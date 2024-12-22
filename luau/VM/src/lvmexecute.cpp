@@ -191,6 +191,76 @@ inline bool luau_skipstep(uint8_t op)
     return op == LOP_PREPVARARGS || op == LOP_BREAK;
 }
 
+unsigned long long luau_getfuelcost(LuauOpcode opcode)
+{
+    switch(opcode)
+    {
+        case LOP_NOP: case LOP_BREAK: case LOP_LOADNIL: case LOP_LOADB: case LOP_LOADN:
+        case LOP_LOADK: case LOP_MOVE: case LOP_NOT: case LOP_MINUS: case LOP_LOADKX:
+        case LOP_COVERAGE:
+            return 1;
+
+        case LOP_GETUPVAL: case LOP_SETUPVAL: case LOP_RETURN: case LOP_JUMP:
+        case LOP_ADD: case LOP_SUB: case LOP_AND: case LOP_OR: case LOP_ANDK:
+        case LOP_ORK: case LOP_LENGTH: case LOP_PREPVARARGS: case LOP_CAPTURE:
+        case LOP_SUBRK:
+            return 2;
+
+        case LOP_CLOSEUPVALS: case LOP_JUMPBACK: case LOP_JUMPIF: case LOP_JUMPIFNOT:
+        case LOP_MUL: case LOP_MULK: case LOP_FORNPREP: case LOP_FORNLOOP:
+        case LOP_GETVARARGS: case LOP_JUMPX: case LOP_FASTCALL: case LOP_FASTCALL1:
+        case LOP_FASTCALL2: case LOP_FASTCALL2K: case LOP_FASTCALL3:
+            return 3;
+
+        case LOP_GETTABLE: case LOP_SETTABLE: case LOP_GETTABLEKS: case LOP_SETTABLEKS:
+        case LOP_GETTABLEN: case LOP_SETTABLEN: case LOP_DIV: case LOP_MOD: case LOP_DIVK:
+        case LOP_MODK: case LOP_CONCAT: case LOP_SETLIST: case LOP_FORGLOOP: case LOP_FORGPREP:
+        case LOP_FORGPREP_INEXT: case LOP_FORGPREP_NEXT: case LOP_DIVRK: case LOP_IDIV:
+        case LOP_IDIVK: case LOP_JUMPIFEQ: case LOP_JUMPIFLE: case LOP_JUMPIFLT:
+        case LOP_JUMPIFNOTEQ: case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
+        case LOP_JUMPXEQKNIL: case LOP_JUMPXEQKB: case LOP_JUMPXEQKN: case LOP_JUMPXEQKS:
+            return 4;
+
+        case LOP_GETGLOBAL: case LOP_SETGLOBAL: case LOP_GETIMPORT: case LOP_NAMECALL:
+        case LOP_CALL: case LOP_POW: case LOP_POWK:
+            return 5;
+
+        case LOP_NEWTABLE:
+            return 6;
+
+        case LOP_DUPTABLE: case LOP_DUPCLOSURE:
+            return 8;
+
+        case LOP_NEWCLOSURE: case LOP_NATIVECALL:
+            return 10;
+
+        default:
+            return 1;
+    }
+}
+
+void luau_setfuel(lua_State* L, unsigned long long fuel)
+{
+    L->fuel = fuel;
+}
+
+unsigned long long luau_getfuel(lua_State* L)
+{
+    return L->fuel;
+}
+
+#include "ldebug.h"
+void luau_consumefuel(lua_State* L, LuauOpcode opcode)
+{
+    unsigned long long cost = luau_getfuelcost(opcode);
+    if (L->fuel < cost)
+    {
+        luaG_runerror(L, "out of fuel");
+    }
+    
+    L->fuel -= cost;
+}
+
 template<bool SingleStep>
 static void luau_execute(lua_State* L)
 {
@@ -264,6 +334,7 @@ reentry:
         {
             VM_CASE(LOP_NOP)
             {
+                luau_consumefuel(L, LOP_NOP);
                 Instruction insn = *pc++;
                 LUAU_ASSERT(insn == 0);
                 VM_NEXT();
@@ -271,6 +342,7 @@ reentry:
 
             VM_CASE(LOP_LOADNIL)
             {
+                luau_consumefuel(L, LOP_LOADNIL);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -280,6 +352,7 @@ reentry:
 
             VM_CASE(LOP_LOADB)
             {
+                luau_consumefuel(L, LOP_LOADB);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -292,6 +365,7 @@ reentry:
 
             VM_CASE(LOP_LOADN)
             {
+                luau_consumefuel(L, LOP_LOADN);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -301,6 +375,7 @@ reentry:
 
             VM_CASE(LOP_LOADK)
             {
+                luau_consumefuel(L, LOP_LOADK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* kv = VM_KV(LUAU_INSN_D(insn));
@@ -311,6 +386,7 @@ reentry:
 
             VM_CASE(LOP_MOVE)
             {
+                luau_consumefuel(L, LOP_MOVE);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -321,6 +397,7 @@ reentry:
 
             VM_CASE(LOP_GETGLOBAL)
             {
+                luau_consumefuel(L, LOP_GETGLOBAL);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 uint32_t aux = *pc++;
@@ -352,6 +429,7 @@ reentry:
 
             VM_CASE(LOP_SETGLOBAL)
             {
+                luau_consumefuel(L, LOP_SETGLOBAL);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 uint32_t aux = *pc++;
@@ -384,6 +462,7 @@ reentry:
 
             VM_CASE(LOP_GETUPVAL)
             {
+                luau_consumefuel(L, LOP_GETUPVAL);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* ur = VM_UV(LUAU_INSN_B(insn));
@@ -395,6 +474,7 @@ reentry:
 
             VM_CASE(LOP_SETUPVAL)
             {
+                luau_consumefuel(L, LOP_SETUPVAL);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* ur = VM_UV(LUAU_INSN_B(insn));
@@ -407,6 +487,7 @@ reentry:
 
             VM_CASE(LOP_CLOSEUPVALS)
             {
+                luau_consumefuel(L, LOP_CLOSEUPVALS);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -417,6 +498,7 @@ reentry:
 
             VM_CASE(LOP_GETIMPORT)
             {
+                luau_consumefuel(L, LOP_GETIMPORT);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* kv = VM_KV(LUAU_INSN_D(insn));
@@ -439,6 +521,7 @@ reentry:
 
             VM_CASE(LOP_GETTABLEKS)
             {
+                luau_consumefuel(L, LOP_GETTABLEKS);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -556,6 +639,7 @@ reentry:
 
             VM_CASE(LOP_SETTABLEKS)
             {
+                luau_consumefuel(L, LOP_SETTABLEKS);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -632,6 +716,7 @@ reentry:
 
             VM_CASE(LOP_GETTABLE)
             {
+                luau_consumefuel(L, LOP_GETTABLE);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -662,6 +747,7 @@ reentry:
 
             VM_CASE(LOP_SETTABLE)
             {
+                luau_consumefuel(L, LOP_SETTABLE);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -693,6 +779,7 @@ reentry:
 
             VM_CASE(LOP_GETTABLEN)
             {
+                luau_consumefuel(L, LOP_GETTABLEN);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -721,6 +808,7 @@ reentry:
 
             VM_CASE(LOP_SETTABLEN)
             {
+                luau_consumefuel(L, LOP_SETTABLEN);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -750,6 +838,7 @@ reentry:
 
             VM_CASE(LOP_NEWCLOSURE)
             {
+                luau_consumefuel(L, LOP_NEWCLOSURE);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -793,6 +882,7 @@ reentry:
 
             VM_CASE(LOP_NAMECALL)
             {
+                luau_consumefuel(L, LOP_NAMECALL);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -899,6 +989,7 @@ reentry:
 
             VM_CASE(LOP_CALL)
             {
+                luau_consumefuel(L, LOP_CALL);
                 VM_INTERRUPT();
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -997,6 +1088,7 @@ reentry:
 
             VM_CASE(LOP_RETURN)
             {
+                luau_consumefuel(L, LOP_RETURN);
                 VM_INTERRUPT();
                 Instruction insn = *pc++;
                 StkId ra = &base[LUAU_INSN_A(insn)]; // note: this can point to L->top if b == LUA_MULTRET making VM_REG unsafe to use
@@ -1058,6 +1150,7 @@ reentry:
 
             VM_CASE(LOP_JUMP)
             {
+                luau_consumefuel(L, LOP_JUMP);
                 Instruction insn = *pc++;
 
                 pc += LUAU_INSN_D(insn);
@@ -1067,6 +1160,7 @@ reentry:
 
             VM_CASE(LOP_JUMPIF)
             {
+                luau_consumefuel(L, LOP_JUMPIF);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -1077,6 +1171,7 @@ reentry:
 
             VM_CASE(LOP_JUMPIFNOT)
             {
+                luau_consumefuel(L, LOP_JUMPIFNOT);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -1087,6 +1182,7 @@ reentry:
 
             VM_CASE(LOP_JUMPIFEQ)
             {
+                luau_consumefuel(L, LOP_JUMPIFEQ);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -1202,6 +1298,7 @@ reentry:
 
             VM_CASE(LOP_JUMPIFNOTEQ)
             {
+                luau_consumefuel(L, LOP_JUMPIFNOTEQ);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -1317,6 +1414,7 @@ reentry:
 
             VM_CASE(LOP_JUMPIFLE)
             {
+                luau_consumefuel(L, LOP_JUMPIFLE);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -1350,6 +1448,7 @@ reentry:
 
             VM_CASE(LOP_JUMPIFNOTLE)
             {
+                luau_consumefuel(L, LOP_JUMPIFNOTLE);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -1383,6 +1482,7 @@ reentry:
 
             VM_CASE(LOP_JUMPIFLT)
             {
+                luau_consumefuel(L, LOP_JUMPIFLT);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -1416,6 +1516,7 @@ reentry:
 
             VM_CASE(LOP_JUMPIFNOTLT)
             {
+                luau_consumefuel(L, LOP_JUMPIFNOTLT);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -1449,6 +1550,7 @@ reentry:
 
             VM_CASE(LOP_ADD)
             {
+                luau_consumefuel(L, LOP_ADD);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1495,6 +1597,7 @@ reentry:
 
             VM_CASE(LOP_SUB)
             {
+                luau_consumefuel(L, LOP_SUB);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1541,6 +1644,7 @@ reentry:
 
             VM_CASE(LOP_MUL)
             {
+                luau_consumefuel(L, LOP_MUL);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1602,6 +1706,7 @@ reentry:
 
             VM_CASE(LOP_DIV)
             {
+                luau_consumefuel(L, LOP_DIV);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1663,6 +1768,7 @@ reentry:
 
             VM_CASE(LOP_IDIV)
             {
+                luau_consumefuel(L, LOP_IDIV);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1716,6 +1822,7 @@ reentry:
 
             VM_CASE(LOP_MOD)
             {
+                luau_consumefuel(L, LOP_MOD);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1739,6 +1846,7 @@ reentry:
 
             VM_CASE(LOP_POW)
             {
+                luau_consumefuel(L, LOP_POW);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1760,6 +1868,7 @@ reentry:
 
             VM_CASE(LOP_ADDK)
             {
+                luau_consumefuel(L, LOP_ADDK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1781,6 +1890,7 @@ reentry:
 
             VM_CASE(LOP_SUBK)
             {
+                luau_consumefuel(L, LOP_SUBK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1802,6 +1912,7 @@ reentry:
 
             VM_CASE(LOP_MULK)
             {
+                luau_consumefuel(L, LOP_MULK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1848,6 +1959,7 @@ reentry:
 
             VM_CASE(LOP_DIVK)
             {
+                luau_consumefuel(L, LOP_DIVK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1894,6 +2006,7 @@ reentry:
 
             VM_CASE(LOP_IDIVK)
             {
+                luau_consumefuel(L, LOP_IDIVK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1946,6 +2059,7 @@ reentry:
 
             VM_CASE(LOP_MODK)
             {
+                luau_consumefuel(L, LOP_MODK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1969,6 +2083,7 @@ reentry:
 
             VM_CASE(LOP_POWK)
             {
+                luau_consumefuel(L, LOP_POWK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -1996,6 +2111,7 @@ reentry:
 
             VM_CASE(LOP_AND)
             {
+                luau_consumefuel(L, LOP_AND);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -2007,6 +2123,7 @@ reentry:
 
             VM_CASE(LOP_OR)
             {
+                luau_consumefuel(L, LOP_OR);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -2018,6 +2135,7 @@ reentry:
 
             VM_CASE(LOP_ANDK)
             {
+                luau_consumefuel(L, LOP_ANDK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -2029,6 +2147,7 @@ reentry:
 
             VM_CASE(LOP_ORK)
             {
+                luau_consumefuel(L, LOP_ORK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -2040,6 +2159,7 @@ reentry:
 
             VM_CASE(LOP_CONCAT)
             {
+                luau_consumefuel(L, LOP_CONCAT);
                 Instruction insn = *pc++;
                 int b = LUAU_INSN_B(insn);
                 int c = LUAU_INSN_C(insn);
@@ -2056,6 +2176,7 @@ reentry:
 
             VM_CASE(LOP_NOT)
             {
+                luau_consumefuel(L, LOP_NOT);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -2067,6 +2188,7 @@ reentry:
 
             VM_CASE(LOP_MINUS)
             {
+                luau_consumefuel(L, LOP_MINUS);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -2110,6 +2232,7 @@ reentry:
 
             VM_CASE(LOP_LENGTH)
             {
+                luau_consumefuel(L, LOP_LENGTH);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = VM_REG(LUAU_INSN_B(insn));
@@ -2148,6 +2271,7 @@ reentry:
 
             VM_CASE(LOP_NEWTABLE)
             {
+                luau_consumefuel(L, LOP_NEWTABLE);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 int b = LUAU_INSN_B(insn);
@@ -2162,6 +2286,7 @@ reentry:
 
             VM_CASE(LOP_DUPTABLE)
             {
+                luau_consumefuel(L, LOP_DUPTABLE);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* kv = VM_KV(LUAU_INSN_D(insn));
@@ -2175,6 +2300,7 @@ reentry:
 
             VM_CASE(LOP_SETLIST)
             {
+                luau_consumefuel(L, LOP_SETLIST);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 StkId rb = &base[LUAU_INSN_B(insn)]; // note: this can point to L->top if c == LUA_MULTRET making VM_REG unsafe to use
@@ -2212,6 +2338,7 @@ reentry:
 
             VM_CASE(LOP_FORNPREP)
             {
+                luau_consumefuel(L, LOP_FORNPREP);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -2236,6 +2363,7 @@ reentry:
 
             VM_CASE(LOP_FORNLOOP)
             {
+                luau_consumefuel(L, LOP_FORNLOOP);
                 VM_INTERRUPT();
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -2263,6 +2391,7 @@ reentry:
 
             VM_CASE(LOP_FORGPREP)
             {
+                luau_consumefuel(L, LOP_FORGPREP);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -2321,6 +2450,7 @@ reentry:
 
             VM_CASE(LOP_FORGLOOP)
             {
+                luau_consumefuel(L, LOP_FORGLOOP);
                 VM_INTERRUPT();
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -2421,6 +2551,7 @@ reentry:
 
             VM_CASE(LOP_FORGPREP_INEXT)
             {
+                luau_consumefuel(L, LOP_FORGPREP_INEXT);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -2444,6 +2575,7 @@ reentry:
 
             VM_CASE(LOP_FORGPREP_NEXT)
             {
+                luau_consumefuel(L, LOP_FORGPREP_NEXT);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 
@@ -2467,6 +2599,7 @@ reentry:
 
             VM_CASE(LOP_NATIVECALL)
             {
+                luau_consumefuel(L, LOP_NATIVECALL);
                 Proto* p = cl->l.p;
                 LUAU_ASSERT(p->execdata);
 
@@ -2487,6 +2620,7 @@ reentry:
 
             VM_CASE(LOP_GETVARARGS)
             {
+                luau_consumefuel(L, LOP_GETVARARGS);
                 Instruction insn = *pc++;
                 int b = LUAU_INSN_B(insn) - 1;
                 int n = cast_int(base - L->ci->func) - cl->l.p->numparams - 1;
@@ -2516,6 +2650,7 @@ reentry:
 
             VM_CASE(LOP_DUPCLOSURE)
             {
+                luau_consumefuel(L, LOP_DUPCLOSURE);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* kv = VM_KV(LUAU_INSN_D(insn));
@@ -2573,6 +2708,7 @@ reentry:
 
             VM_CASE(LOP_PREPVARARGS)
             {
+                luau_consumefuel(L, LOP_PREPVARARGS);
                 Instruction insn = *pc++;
                 int numparams = LUAU_INSN_A(insn);
 
@@ -2603,6 +2739,7 @@ reentry:
 
             VM_CASE(LOP_JUMPBACK)
             {
+                luau_consumefuel(L, LOP_JUMPBACK);
                 VM_INTERRUPT();
                 Instruction insn = *pc++;
 
@@ -2613,6 +2750,7 @@ reentry:
 
             VM_CASE(LOP_LOADKX)
             {
+                luau_consumefuel(L, LOP_LOADKX);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 uint32_t aux = *pc++;
@@ -2624,6 +2762,7 @@ reentry:
 
             VM_CASE(LOP_JUMPX)
             {
+                luau_consumefuel(L, LOP_JUMPX);
                 VM_INTERRUPT();
                 Instruction insn = *pc++;
 
@@ -2634,6 +2773,7 @@ reentry:
 
             VM_CASE(LOP_FASTCALL)
             {
+                luau_consumefuel(L, LOP_FASTCALL);
                 Instruction insn = *pc++;
                 int bfid = LUAU_INSN_A(insn);
                 int skip = LUAU_INSN_C(insn);
@@ -2683,6 +2823,7 @@ reentry:
 
             VM_CASE(LOP_COVERAGE)
             {
+                luau_consumefuel(L, LOP_COVERAGE);
                 Instruction insn = *pc++;
                 int hits = LUAU_INSN_E(insn);
 
@@ -2695,12 +2836,14 @@ reentry:
 
             VM_CASE(LOP_CAPTURE)
             {
+                luau_consumefuel(L, LOP_CAPTURE);
                 LUAU_ASSERT(!"CAPTURE is a pseudo-opcode and must be executed as part of NEWCLOSURE");
                 LUAU_UNREACHABLE();
             }
 
             VM_CASE(LOP_SUBRK)
             {
+                luau_consumefuel(L, LOP_SUBRK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* kv = VM_KV(LUAU_INSN_B(insn));
@@ -2722,6 +2865,7 @@ reentry:
 
             VM_CASE(LOP_DIVRK)
             {
+                luau_consumefuel(L, LOP_DIVRK);
                 Instruction insn = *pc++;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* kv = VM_KV(LUAU_INSN_B(insn));
@@ -2750,6 +2894,7 @@ reentry:
 
             VM_CASE(LOP_FASTCALL1)
             {
+                luau_consumefuel(L, LOP_FASTCALL1);
                 Instruction insn = *pc++;
                 int bfid = LUAU_INSN_A(insn);
                 TValue* arg = VM_REG(LUAU_INSN_B(insn));
@@ -2798,6 +2943,7 @@ reentry:
 
             VM_CASE(LOP_FASTCALL2)
             {
+                luau_consumefuel(L, LOP_FASTCALL2);
                 Instruction insn = *pc++;
                 int bfid = LUAU_INSN_A(insn);
                 int skip = LUAU_INSN_C(insn) - 1;
@@ -2848,6 +2994,7 @@ reentry:
 
             VM_CASE(LOP_FASTCALL2K)
             {
+                luau_consumefuel(L, LOP_FASTCALL2K);
                 Instruction insn = *pc++;
                 int bfid = LUAU_INSN_A(insn);
                 int skip = LUAU_INSN_C(insn) - 1;
@@ -2898,6 +3045,7 @@ reentry:
 
             VM_CASE(LOP_FASTCALL3)
             {
+                luau_consumefuel(L, LOP_FASTCALL3);
                 Instruction insn = *pc++;
                 int bfid = LUAU_INSN_A(insn);
                 int skip = LUAU_INSN_C(insn) - 1;
@@ -2952,6 +3100,7 @@ reentry:
 
             VM_CASE(LOP_BREAK)
             {
+                luau_consumefuel(L, LOP_BREAK);
                 LUAU_ASSERT(cl->l.p->debuginsn);
 
                 uint8_t op = cl->l.p->debuginsn[unsigned(pc - cl->l.p->code)];
@@ -2971,6 +3120,7 @@ reentry:
 
             VM_CASE(LOP_JUMPXEQKNIL)
             {
+                luau_consumefuel(L, LOP_JUMPXEQKNIL);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -2984,6 +3134,7 @@ reentry:
 
             VM_CASE(LOP_JUMPXEQKB)
             {
+                luau_consumefuel(L, LOP_JUMPXEQKB);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -2995,6 +3146,7 @@ reentry:
 
             VM_CASE(LOP_JUMPXEQKN)
             {
+                luau_consumefuel(L, LOP_JUMPXEQKN);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
@@ -3017,6 +3169,7 @@ reentry:
 
             VM_CASE(LOP_JUMPXEQKS)
             {
+                luau_consumefuel(L, LOP_JUMPXEQKS);
                 Instruction insn = *pc++;
                 uint32_t aux = *pc;
                 StkId ra = VM_REG(LUAU_INSN_A(insn));

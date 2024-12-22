@@ -273,6 +273,8 @@ struct lua_State
     TString* namecall; // when invoked from Luau using NAMECALL, what method do we need to invoke?
 
     void* userdata;
+
+    unsigned long long fuel;
 };
 // clang-format on
 
