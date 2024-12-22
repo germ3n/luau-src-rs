@@ -239,11 +239,13 @@ unsigned long long luau_getfuelcost(LuauOpcode opcode)
     }
 }
 
+extern "C"
 void luau_setfuel(lua_State* L, unsigned long long fuel)
 {
     L->fuel = fuel;
 }
 
+extern "C"
 unsigned long long luau_getfuel(lua_State* L)
 {
     return L->fuel;
