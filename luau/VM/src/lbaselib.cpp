@@ -433,7 +433,7 @@ static const luaL_Reg base_funcs[] = {
     {"getmetatable", luaB_getmetatable},
     {"next", luaB_next},
     //{"newproxy", luaB_newproxy},
-    //{"print", luaB_print},
+    {"print", luaB_print},
     {"rawequal", luaB_rawequal},
     {"rawget", luaB_rawget},
     {"rawset", luaB_rawset},
