@@ -328,7 +328,7 @@ static void createmetatable(lua_State* L)
 
 int luaopen_vector(lua_State* L)
 {
-    luaL_register(L, LUA_VECLIBNAME, vectorlib);
+    /*luaL_register(L, LUA_VECLIBNAME, vectorlib);
 
 #if LUA_VECTOR_SIZE == 4
     lua_pushvector(L, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -345,5 +345,7 @@ int luaopen_vector(lua_State* L)
     if (FFlag::LuauVectorMetatable)
         createmetatable(L);
 
-    return 1;
+    return 1;*/
+
+    return 0;
 }

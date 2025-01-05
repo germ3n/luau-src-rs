@@ -179,6 +179,6 @@ static const luaL_Reg dblib[] = {
 
 int luaopen_debug(lua_State* L)
 {
-    luaL_register(L, LUA_DBLIBNAME, dblib);
-    return 1;
+    //luaL_register(L, LUA_DBLIBNAME, dblib);
+    return 0;//1;
 }

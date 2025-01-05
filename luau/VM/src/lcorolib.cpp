@@ -271,10 +271,10 @@ static const luaL_Reg co_funcs[] = {
 
 int luaopen_coroutine(lua_State* L)
 {
-    luaL_register(L, LUA_COLIBNAME, co_funcs);
+    //luaL_register(L, LUA_COLIBNAME, co_funcs);
 
-    lua_pushcclosurek(L, coresumey, "resume", 0, coresumecont);
-    lua_setfield(L, -2, "resume");
+    //lua_pushcclosurek(L, coresumey, "resume", 0, coresumecont);
+    //lua_setfield(L, -2, "resume");
 
-    return 1;
+    return 0;//1;
 }

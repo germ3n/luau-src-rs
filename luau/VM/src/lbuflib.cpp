@@ -277,7 +277,7 @@ static const luaL_Reg bufferlib[] = {
 
 int luaopen_buffer(lua_State* L)
 {
-    luaL_register(L, LUA_BUFFERLIBNAME, bufferlib);
+    //luaL_register(L, LUA_BUFFERLIBNAME, bufferlib);
 
-    return 1;
+    return 0;//1;
 }

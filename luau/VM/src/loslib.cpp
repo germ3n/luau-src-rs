@@ -220,6 +220,6 @@ static const luaL_Reg syslib[] = {
 
 int luaopen_os(lua_State* L)
 {
-    luaL_register(L, LUA_OSLIBNAME, syslib);
-    return 1;
+    //luaL_register(L, LUA_OSLIBNAME, syslib);
+    return 0;//1;
 }
