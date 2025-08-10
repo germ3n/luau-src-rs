@@ -245,6 +245,16 @@ bool AstExprFunction::hasNativeAttribute() const
     return false;
 }
 
+bool AstExprFunction::hasNoReentryAttribute() const
+{
+    for (const auto attribute : attributes)
+    {
+        if (attribute->type == AstAttr::Type::NoReentry)
+            return true;
+    }
+    return false;
+}
+
 AstExprTable::AstExprTable(const Location& location, const AstArray<Item>& items)
     : AstExpr(ClassIndex(), location)
     , items(items)

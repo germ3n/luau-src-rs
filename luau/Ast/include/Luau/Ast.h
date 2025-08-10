@@ -208,6 +208,7 @@ public:
     {
         Checked,
         Native,
+        NoReentry,
     };
 
     AstAttr(const Location& location, Type type);
@@ -441,6 +442,7 @@ public:
     void visit(AstVisitor* visitor) override;
 
     bool hasNativeAttribute() const;
+    bool hasNoReentryAttribute() const;
 
     AstArray<AstAttr*> attributes;
     AstArray<AstGenericType> generics;
