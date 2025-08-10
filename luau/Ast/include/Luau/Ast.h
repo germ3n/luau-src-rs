@@ -209,6 +209,9 @@ public:
         Checked,
         Native,
         NoReentry,
+        AlwaysInline,
+        NoInline,
+        Deprecated,
     };
 
     AstAttr(const Location& location, Type type);
@@ -443,6 +446,9 @@ public:
 
     bool hasNativeAttribute() const;
     bool hasNoReentryAttribute() const;
+    bool hasAlwaysInlineAttribute() const;
+    bool hasNoInlineAttribute() const;
+    bool hasDeprecatedAttribute() const;
 
     AstArray<AstAttr*> attributes;
     AstArray<AstGenericType> generics;

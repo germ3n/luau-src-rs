@@ -255,6 +255,36 @@ bool AstExprFunction::hasNoReentryAttribute() const
     return false;
 }
 
+bool AstExprFunction::hasAlwaysInlineAttribute() const
+{
+    for (const auto attribute : attributes)
+    {
+        if (attribute->type == AstAttr::Type::AlwaysInline)
+            return true;
+    }
+    return false;
+}
+
+bool AstExprFunction::hasNoInlineAttribute() const
+{
+    for (const auto attribute : attributes)
+    {
+        if (attribute->type == AstAttr::Type::NoInline)
+            return true;
+    }
+    return false;
+}
+
+bool AstExprFunction::hasDeprecatedAttribute() const
+{
+    for (const auto attribute : attributes)
+    {
+        if (attribute->type == AstAttr::Type::Deprecated)
+            return true;
+    }
+    return false;
+}
+
 AstExprTable::AstExprTable(const Location& location, const AstArray<Item>& items)
     : AstExpr(ClassIndex(), location)
     , items(items)

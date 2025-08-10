@@ -37,7 +37,10 @@ struct AttributeEntry
 AttributeEntry kAttributeEntries[] = {
     {"@checked", AstAttr::Type::Checked}, 
     {"@native", AstAttr::Type::Native}, 
-    {"@noReentry", AstAttr::Type::NoReentry}, 
+    {"@noReentry", AstAttr::Type::NoReentry},
+    {"@alwaysInline", AstAttr::Type::AlwaysInline},
+    {"@noInline", AstAttr::Type::NoInline},
+    {"@deprecated", AstAttr::Type::Deprecated},
     {nullptr, AstAttr::Type::Checked}};
 
 ParseError::ParseError(const Location& location, const std::string& message)
