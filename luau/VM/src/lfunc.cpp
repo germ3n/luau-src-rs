@@ -59,6 +59,7 @@ Closure* luaF_newLclosure(lua_State* L, int nelems, Table* e, Proto* p)
 {
     Closure* c = luaM_newgco(L, Closure, sizeLclosure(nelems), L->activememcat);
     luaC_init(L, c, LUA_TFUNCTION);
+    c->id = L->global->objectid++;
     c->isC = 0;
     c->env = e;
     c->nupvalues = cast_byte(nelems);
@@ -74,6 +75,7 @@ Closure* luaF_newCclosure(lua_State* L, int nelems, Table* e)
 {
     Closure* c = luaM_newgco(L, Closure, sizeCclosure(nelems), L->activememcat);
     luaC_init(L, c, LUA_TFUNCTION);
+    c->id = L->global->objectid++;
     c->isC = 1;
     c->env = e;
     c->nupvalues = cast_byte(nelems);

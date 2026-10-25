@@ -58,11 +58,8 @@ const LuaNode luaH_dummynode = {
 #define hashstr(t, str) hashpow2(t, (str)->hash)
 #define hashboolean(t, p) hashpow2(t, p)
 
-static LuaNode* hashpointer(const Table* t, const void* p)
+static LuaNode* hashmixed(const Table* t, unsigned int h)
 {
-    // we discard the high 32-bit portion of the pointer on 64-bit platforms as it doesn't carry much entropy anyway
-    unsigned int h = unsigned(uintptr_t(p));
-
     // MurmurHash3 32-bit finalizer
     h ^= h >> 16;
     h *= 0x85ebca6bu;
@@ -71,6 +68,12 @@ static LuaNode* hashpointer(const Table* t, const void* p)
     h ^= h >> 16;
 
     return hashpow2(t, h);
+}
+
+static LuaNode* hashpointer(const Table* t, const void* p)
+{
+    // we discard the high 32-bit portion of the pointer on 64-bit platforms as it doesn't carry much entropy anyway
+    return hashmixed(t, unsigned(uintptr_t(p)));
 }
 
 static LuaNode* hashnum(const Table* t, double n)
@@ -142,9 +145,17 @@ static LuaNode* mainposition(const Table* t, const TValue* key)
         return hashstr(t, tsvalue(key));
     case LUA_TBOOLEAN:
         return hashboolean(t, bvalue(key));
+    // Tables and functions hash by the order they were made in, the same on every machine that
+    // runs the same script; by address, a table keyed by them would iterate differently on each.
+    case LUA_TTABLE:
+        return hashmixed(t, hvalue(key)->id);
+    case LUA_TFUNCTION:
+        return hashmixed(t, clvalue(key)->id);
     case LUA_TLIGHTUSERDATA:
         return hashpointer(t, pvalue(key));
     default:
+        // userdata never becomes a key (luaH_newkey refuses it), so a lookup by one finds nothing
+        // wherever it hashes; threads and buffers are left to their addresses
         return hashpointer(t, gcvalue(key));
     }
 }
@@ -495,6 +506,7 @@ Table* luaH_new(lua_State* L, int narray, int nhash)
 {
     Table* t = luaM_newgco(L, Table, sizeof(Table), L->activememcat);
     luaC_init(L, t, LUA_TTABLE);
+    t->id = L->global->objectid++;
     t->metatable = NULL;
     t->tmcache = cast_byte(~0);
     t->array = NULL;
@@ -695,6 +707,9 @@ TValue* luaH_newkey(lua_State* L, Table* t, const TValue* key)
         luaG_runerror(L, "table index is NaN");
     else if (ttisvector(key) && luai_vecisnan(vvalue(key)))
         luaG_runerror(L, "table index contains NaN");
+    else if (ttisuserdata(key))
+        // a userdata is a new object each time, so two equal values would be two keys
+        luaG_runerror(L, "table index is a userdata; use a string or a number");
     return newkey(L, t, key);
 }
 
@@ -797,6 +812,7 @@ Table* luaH_clone(lua_State* L, Table* tt)
 {
     Table* t = luaM_newgco(L, Table, sizeof(Table), L->activememcat);
     luaC_init(L, t, LUA_TTABLE);
+    t->id = L->global->objectid++;
     t->metatable = tt->metatable;
     t->tmcache = tt->tmcache;
     t->array = NULL;

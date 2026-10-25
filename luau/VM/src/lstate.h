@@ -175,6 +175,8 @@ typedef struct global_State
     uint8_t currentwhite;
     uint8_t gcstate; // state of garbage collector
 
+    uint32_t objectid; // the id the next table or function gets, so the same script hashes them the same everywhere
+
 
     GCObject* gray;      // list of gray objects
     GCObject* grayagain; // list of objects to be traversed atomically

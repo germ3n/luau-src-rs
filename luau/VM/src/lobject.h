@@ -389,6 +389,8 @@ typedef struct Closure
     uint8_t stacksize;
     uint8_t preload;
 
+    uint32_t id; // the order it was made in, which hashes it as a table key: its address would differ from machine to machine
+
     GCObject* gclist;
     struct Table* env;
 
@@ -472,6 +474,7 @@ typedef struct Table
         int aboundary; // negated 'boundary' of `array' array; iff aboundary < 0
     };
 
+    uint32_t id; // the order it was made in, which hashes it as a table key: its address would differ from machine to machine
 
     struct Table* metatable;
     TValue* array;  // array part

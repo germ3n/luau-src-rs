@@ -187,6 +187,7 @@ lua_State* lua_newstate(lua_Alloc f, void* ud)
     g->ptrenckey[1] = 0;
     g->ptrenckey[2] = 0;
     g->ptrenckey[3] = 0;
+    g->objectid = 0;
     g->strt.size = 0;
     g->strt.nuse = 0;
     g->strt.hash = NULL;
