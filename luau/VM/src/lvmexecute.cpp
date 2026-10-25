@@ -1293,6 +1293,16 @@ reentry:
                     LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
                     VM_NEXT();
                 }
+                else if (ttisuserdata(ra) || ttisuserdata(rb))
+                {
+                    // a number against a userdata: its __eq decides (see luaV_equalmixed)
+                    int res;
+                    VM_PROTECT(res = luaV_equalmixed(L, ra, rb));
+
+                    pc += (res == 1) ? LUAU_INSN_D(insn) : 1;
+                    LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
+                    VM_NEXT();
+                }
                 else
                 {
                     pc += 1;
@@ -1404,6 +1414,16 @@ reentry:
                     // note that we don't have a fast path for userdata values without metatables, since that's very rare
                     int res;
                     VM_PROTECT(res = luaV_equalval(L, ra, rb));
+
+                    pc += (res == 0) ? LUAU_INSN_D(insn) : 1;
+                    LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
+                    VM_NEXT();
+                }
+                else if (ttisuserdata(ra) || ttisuserdata(rb))
+                {
+                    // a number against a userdata: its __eq decides (see luaV_equalmixed)
+                    int res;
+                    VM_PROTECT(res = luaV_equalmixed(L, ra, rb));
 
                     pc += (res == 0) ? LUAU_INSN_D(insn) : 1;
                     LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
@@ -3157,6 +3177,17 @@ reentry:
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
                 TValue* kv = VM_KV(aux & 0xffffff);
                 LUAU_ASSERT(ttisnumber(kv));
+
+                if (LUAU_UNLIKELY(ttisuserdata(ra)))
+                {
+                    // a userdata against a number constant: its __eq decides (see luaV_equalmixed)
+                    int res;
+                    VM_PROTECT(res = luaV_equalmixed(L, ra, kv));
+
+                    pc += int(res == 1) != (aux >> 31) ? LUAU_INSN_D(insn) : 1;
+                    LUAU_ASSERT(unsigned(pc - cl->l.p->code) < unsigned(cl->l.p->sizecode));
+                    VM_NEXT();
+                }
 
 #if defined(__aarch64__)
                 // On several ARM chips (Apple M1/M2, Neoverse N1), comparing the result of a floating-point comparison is expensive, and a branch

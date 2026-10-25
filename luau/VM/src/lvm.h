@@ -9,12 +9,13 @@
 
 #define tonumber(o, n) (ttype(o) == LUA_TNUMBER || (((o) = luaV_tonumber(o, n)) != NULL))
 
-#define equalobj(L, o1, o2) (ttype(o1) == ttype(o2) && luaV_equalval(L, o1, o2))
+#define equalobj(L, o1, o2) (ttype(o1) == ttype(o2) ? luaV_equalval(L, o1, o2) : luaV_equalmixed(L, o1, o2))
 
 LUAI_FUNC int luaV_strcmp(const TString* ls, const TString* rs);
 LUAI_FUNC int luaV_lessthan(lua_State* L, const TValue* l, const TValue* r);
 LUAI_FUNC int luaV_lessequal(lua_State* L, const TValue* l, const TValue* r);
 LUAI_FUNC int luaV_equalval(lua_State* L, const TValue* t1, const TValue* t2);
+LUAI_FUNC int luaV_equalmixed(lua_State* L, const TValue* t1, const TValue* t2);
 
 template<TMS op>
 void luaV_doarithimpl(lua_State* L, StkId ra, const TValue* rb, const TValue* rc);

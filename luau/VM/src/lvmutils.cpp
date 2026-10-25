@@ -205,6 +205,22 @@ static int call_orderTM(lua_State* L, const TValue* p1, const TValue* p2, TMS ev
 {
     const TValue* tm1 = luaT_gettmbyobj(L, p1, event);
     const TValue* tm2;
+    // Two userdata: the first one's metamethod decides, or the second's if the first has none, so
+    // the number types a host defines, such as chainv4's U128 and U256, compare across types.
+    // Tables still need the same metamethod on both sides, as in standard Lua.
+    if (ttisuserdata(p1) && ttisuserdata(p2))
+    {
+        if (ttisnil(tm1))
+            tm1 = luaT_gettmbyobj(L, p2, event);
+        if (ttisnil(tm1))
+        {
+            if (error)
+                luaG_ordererror(L, p1, p2, event);
+            return -1; // no metamethod
+        }
+        callTMres(L, L->top, tm1, p1, p2);
+        return !l_isfalse(L->top);
+    }
     if (ttisnil(tm1))
     {
         if (error)
@@ -220,6 +236,31 @@ static int call_orderTM(lua_State* L, const TValue* p1, const TValue* p2, TMS ev
     }
     callTMres(L, L->top, tm1, p1, p2);
     return !l_isfalse(L->top);
+}
+
+// A number against a userdata: the userdata's metamethod decides, so a number type the host
+// defines, such as chainv4's U256, compares with plain numbers. A table against a number is still
+// an error, and still unequal, as in standard Lua.
+static bool isnumberanduserdata(const TValue* l, const TValue* r)
+{
+    return (ttisnumber(l) && ttisuserdata(r)) || (ttisuserdata(l) && ttisnumber(r));
+}
+
+static int call_mixedTM(lua_State* L, const TValue* p1, const TValue* p2, TMS event)
+{
+    const TValue* tm = luaT_gettmbyobj(L, ttisuserdata(p1) ? p1 : p2, event);
+    if (ttisnil(tm))
+        return -1; // no metamethod
+    callTMres(L, L->top, tm, p1, p2);
+    return !l_isfalse(L->top);
+}
+
+int luaV_equalmixed(lua_State* L, const TValue* t1, const TValue* t2)
+{
+    if (!isnumberanduserdata(t1, t2))
+        return 0;
+    int res = call_mixedTM(L, t1, t2, TM_EQ);
+    return res == -1 ? 0 : res;
 }
 
 int luaV_strcmp(const TString* ls, const TString* rs)
@@ -248,7 +289,12 @@ int luaV_strcmp(const TString* ls, const TString* rs)
 int luaV_lessthan(lua_State* L, const TValue* l, const TValue* r)
 {
     if (LUAU_UNLIKELY(ttype(l) != ttype(r)))
-        luaG_ordererror(L, l, r, TM_LT);
+    {
+        int res = isnumberanduserdata(l, r) ? call_mixedTM(L, l, r, TM_LT) : -1;
+        if (res == -1)
+            luaG_ordererror(L, l, r, TM_LT);
+        return res;
+    }
     else if (LUAU_LIKELY(ttisnumber(l)))
         return luai_numlt(nvalue(l), nvalue(r));
     else if (ttisstring(l))
@@ -261,7 +307,16 @@ int luaV_lessequal(lua_State* L, const TValue* l, const TValue* r)
 {
     int res;
     if (ttype(l) != ttype(r))
+    {
+        if (isnumberanduserdata(l, r))
+        {
+            if ((res = call_mixedTM(L, l, r, TM_LE)) != -1) // first try `le'
+                return res;
+            if ((res = call_mixedTM(L, r, l, TM_LT)) != -1) // then not `lt' the other way
+                return !res;
+        }
         luaG_ordererror(L, l, r, TM_LE);
+    }
     else if (ttisnumber(l))
         return luai_numle(nvalue(l), nvalue(r));
     else if (ttisstring(l))
@@ -291,7 +346,10 @@ int luaV_equalval(lua_State* L, const TValue* t1, const TValue* t2)
         return pvalue(t1) == pvalue(t2) && lightuserdatatag(t1) == lightuserdatatag(t2);
     case LUA_TUSERDATA:
     {
-        tm = get_compTM(L, uvalue(t1)->metatable, uvalue(t2)->metatable, TM_EQ);
+        // as in call_orderTM: the first one's metamethod, or the second's
+        tm = fasttm(L, uvalue(t1)->metatable, TM_EQ);
+        if (!tm)
+            tm = fasttm(L, uvalue(t2)->metatable, TM_EQ);
         if (!tm)
             return uvalue(t1) == uvalue(t2);
         break; // will try TM
