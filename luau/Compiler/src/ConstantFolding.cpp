@@ -6,6 +6,35 @@
 #include <vector>
 #include <math.h>
 
+namespace
+{
+// A power by repeated squaring, for a whole exponent: plain multiplications, which every platform
+// rounds alike, where the C library's pow() need not. False, computing nothing, for an exponent that
+// is not whole, or past 2^53, as rounding those the same everywhere has no cheap answer.
+static inline bool wholePow(double a, double b, double* result)
+{
+    if (!(b == floor(b)) || !(fabs(b) <= 9007199254740992.0))
+        return false;
+
+    unsigned long long n = (unsigned long long)fabs(b);
+    double base = a;
+    double r = 1.0;
+
+    while (n)
+    {
+        if (n & 1)
+            r *= base;
+        n >>= 1;
+        if (n)
+            base *= base;
+    }
+
+    *result = b < 0 ? 1.0 / r : r;
+    return true;
+}
+
+}
+
 namespace Luau
 {
 namespace Compile
@@ -125,11 +154,10 @@ static void foldBinary(Constant& result, AstExprBinary::Op op, const Constant& l
         break;
 
     case AstExprBinary::Pow:
-        if (la.type == Constant::Type_Number && ra.type == Constant::Type_Number)
-        {
+        // Folded only as the VM computes it, so a contract compiles alike everywhere; a fractional
+        // exponent is left for the VM, which refuses it.
+        if (la.type == Constant::Type_Number && ra.type == Constant::Type_Number && wholePow(la.valueNumber, ra.valueNumber, &result.valueNumber))
             result.type = Constant::Type_Number;
-            result.valueNumber = pow(la.valueNumber, ra.valueNumber);
-        }
         break;
 
     case AstExprBinary::Concat:

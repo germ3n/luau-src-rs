@@ -266,6 +266,18 @@ void luau_consumefuel(lua_State* L, const Instruction* pc, LuauOpcode opcode)
     L->fuel -= cost;
 }
 
+void luau_chargefuel(lua_State* L, unsigned long long cost)
+{
+    if (L->fuel < cost)
+    {
+        // Emptied, as the VM leaves it, so the caller reads the run out, not a script's own error.
+        L->fuel = 0;
+        luaG_runerror(L, "out of fuel");
+    }
+
+    L->fuel -= cost;
+}
+
 template<bool SingleStep>
 static void luau_execute(lua_State* L)
 {
@@ -1880,7 +1892,13 @@ reentry:
                 // fast-path
                 if (ttisnumber(rb) && ttisnumber(rc))
                 {
-                    setnvalue(ra, pow(nvalue(rb), nvalue(rc)));
+                    double r;
+                    if (!luai_wholepow(nvalue(rb), nvalue(rc), &r))
+                    {
+                        L->ci->savedpc = pc;
+                        luaG_runerror(L, LUAU_FRACTIONAL_POWER);
+                    }
+                    setnvalue(ra, r);
                     VM_NEXT();
                 }
                 else
@@ -2120,8 +2138,13 @@ reentry:
                     double nb = nvalue(rb);
                     double nk = nvalue(kv);
 
-                    // pow is very slow so we specialize this for ^2, ^0.5 and ^3
-                    double r = (nk == 2.0) ? nb * nb : (nk == 0.5) ? sqrt(nb) : (nk == 3.0) ? nb * nb * nb : pow(nb, nk);
+                    // Whole exponents only, by repeated squaring, the same on every platform.
+                    double r;
+                    if (!luai_wholepow(nb, nk, &r))
+                    {
+                        L->ci->savedpc = pc;
+                        luaG_runerror(L, LUAU_FRACTIONAL_POWER);
+                    }
 
                     setnvalue(ra, r);
                     VM_NEXT();
@@ -2191,6 +2214,9 @@ reentry:
 
                 // This call may realloc the stack! So we need to query args further down
                 VM_PROTECT(luaV_concat(L, c - b + 1, c));
+
+                // The bytes it copied: a big string joined again and again costs what it copies.
+                VM_PROTECT(if (ttisstring(base + b)) luau_chargebytes(L, tsvalue(base + b)->len));
 
                 StkId ra = VM_REG(LUAU_INSN_A(insn));
 

@@ -1,6 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 // This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lualib.h"
+#include "lnumutils.h"
 
 #include "lstate.h"
 
@@ -133,7 +134,10 @@ static int math_sqrt(lua_State* L)
 
 static int math_pow(lua_State* L)
 {
-    lua_pushnumber(L, pow(luaL_checknumber(L, 1), luaL_checknumber(L, 2)));
+    double r;
+    if (!luai_wholepow(luaL_checknumber(L, 1), luaL_checknumber(L, 2), &r))
+        luaL_error(L, LUAU_FRACTIONAL_POWER);
+    lua_pushnumber(L, r);
     return 1;
 }
 

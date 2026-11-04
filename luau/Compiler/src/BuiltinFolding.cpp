@@ -5,6 +5,35 @@
 
 #include <math.h>
 
+namespace
+{
+// A power by repeated squaring, for a whole exponent: plain multiplications, which every platform
+// rounds alike, where the C library's pow() need not. False, computing nothing, for an exponent that
+// is not whole, or past 2^53, as rounding those the same everywhere has no cheap answer.
+static inline bool wholePow(double a, double b, double* result)
+{
+    if (!(b == floor(b)) || !(fabs(b) <= 9007199254740992.0))
+        return false;
+
+    unsigned long long n = (unsigned long long)fabs(b);
+    double base = a;
+    double r = 1.0;
+
+    while (n)
+    {
+        if (n & 1)
+            r *= base;
+        n >>= 1;
+        if (n)
+            base *= base;
+    }
+
+    *result = b < 0 ? 1.0 / r : r;
+    return true;
+}
+
+}
+
 namespace Luau
 {
 namespace Compile
@@ -215,7 +244,11 @@ Constant foldBuiltin(int bfid, const Constant* args, size_t count)
 
     case LBF_MATH_POW:
         if (count == 2 && args[0].type == Constant::Type_Number && args[1].type == Constant::Type_Number)
-            return cnum(pow(args[0].valueNumber, args[1].valueNumber));
+        {
+            double r;
+            if (wholePow(args[0].valueNumber, args[1].valueNumber, &r))
+                return cnum(r);
+        }
         break;
 
     case LBF_MATH_RAD:

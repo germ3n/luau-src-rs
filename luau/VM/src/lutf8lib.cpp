@@ -1,6 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 // This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lualib.h"
+#include "lvm.h"
 
 #include "lcommon.h"
 
@@ -68,6 +69,8 @@ static int utflen(lua_State* L)
     int posj = u_posrelat(luaL_optinteger(L, 3, -1), len);
     luaL_argcheck(L, 1 <= posi && --posi <= (int)len, 2, "initial position out of string");
     luaL_argcheck(L, --posj < (int)len, 3, "final position out of string");
+    if (posi <= posj)
+        luau_chargebytes(L, posj - posi + 1);
     while (posi <= posj)
     {
         const char* s1 = utf8_decode(s + posi, NULL);
@@ -104,6 +107,7 @@ static int codepoint(lua_State* L)
         luaL_error(L, "string slice too long");
     n = (int)(pose - posi) + 1;
     luaL_checkstack(L, n, "string slice too long");
+    luau_chargeelements(L, n);
     n = 0;
     se = s + pose;
     for (s += posi - 1; s < se;)

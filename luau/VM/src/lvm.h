@@ -12,6 +12,15 @@
 #define equalobj(L, o1, o2) (ttype(o1) == ttype(o2) ? luaV_equalval(L, o1, o2) : luaV_equalmixed(L, o1, o2))
 
 LUAI_FUNC int luaV_strcmp(const TString* ls, const TString* rs);
+
+// Fuel for library work that grows with what it is given, which the instruction calling it does not
+// pay for: so many bytes copied, scanned or built for one unit, and one unit per step elsewhere.
+#define LUAU_FUEL_BYTES 64
+#define LUAU_FUEL_ELEMENTS 8
+// Charges cost, raising "out of fuel" with the tank emptied when there is less than that left.
+LUAI_FUNC void luau_chargefuel(lua_State* L, unsigned long long cost);
+#define luau_chargebytes(L, n) luau_chargefuel((L), (unsigned long long)(n) / LUAU_FUEL_BYTES)
+#define luau_chargeelements(L, n) luau_chargefuel((L), (unsigned long long)(n) / LUAU_FUEL_ELEMENTS)
 LUAI_FUNC int luaV_lessthan(lua_State* L, const TValue* l, const TValue* r);
 LUAI_FUNC int luaV_lessequal(lua_State* L, const TValue* l, const TValue* r);
 LUAI_FUNC int luaV_equalval(lua_State* L, const TValue* t1, const TValue* t2);

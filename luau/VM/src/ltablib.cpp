@@ -54,6 +54,7 @@ static int maxn(lua_State* L)
     luaL_checktype(L, 1, LUA_TTABLE);
 
     Table* t = hvalue(L->base);
+    luau_chargeelements(L, (unsigned long long)t->sizearray + sizenode(t));
 
     for (int i = 0; i < t->sizearray; i++)
     {
@@ -94,6 +95,9 @@ static void moveelements(lua_State* L, int srct, int dstt, int f, int e, int t)
         luaG_readonlyerror(L);
 
     int n = e - f + 1; // number of elements to move
+
+    if (n > 0)
+        luau_chargeelements(L, n);
 
     if (cast_to(unsigned int, f - 1) < cast_to(unsigned int, src->sizearray) &&
         cast_to(unsigned int, t - 1) < cast_to(unsigned int, dst->sizearray) &&
@@ -266,6 +270,8 @@ static int tconcat(lua_State* L)
     if (i == last) // add last value (if interval was not empty)
         addfield(L, &b, i, t);
     luaL_pushresult(&b);
+    // What it wrote, and the elements it went over.
+    luau_chargebytes(L, lua_objlen(L, -1));
     return 1;
 }
 
@@ -491,7 +497,14 @@ static int tsort(lua_State* L)
     lua_settop(L, 2); // make sure there are two arguments
 
     if (n > 0)
+    {
+        // About as many comparisons as it makes: a predicate's own instructions are paid for besides.
+        unsigned long long bits = 1;
+        for (int left = n; left > 1; left >>= 1)
+            bits++;
+        luau_chargefuel(L, (unsigned long long)n * bits);
         sort_rec(L, t, 0, n - 1, n, pred);
+    }
     return 0;
 }
 
@@ -500,6 +513,8 @@ static int tcreate(lua_State* L)
     int size = luaL_checkinteger(L, 1);
     if (size < 0)
         luaL_argerror(L, 1, "size out of range");
+
+    luau_chargeelements(L, size);
 
     if (!lua_isnoneornil(L, 2))
     {
@@ -535,6 +550,10 @@ static int tfind(lua_State* L)
 
     for (int i = init;; ++i)
     {
+        // Every eighth element looked at is paid for.
+        if ((i - init) % LUAU_FUEL_ELEMENTS == LUAU_FUEL_ELEMENTS - 1)
+            luau_chargefuel(L, 1);
+
         const TValue* e = luaH_getnum(t, i);
         if (ttisnil(e))
             break;
@@ -558,6 +577,7 @@ static int tclear(lua_State* L)
     if (tt->readonly)
         luaG_readonlyerror(L);
 
+    luau_chargeelements(L, (unsigned long long)tt->sizearray + sizenode(tt));
     luaH_clear(tt);
     return 0;
 }
@@ -587,7 +607,9 @@ static int tclone(lua_State* L)
     luaL_checktype(L, 1, LUA_TTABLE);
     luaL_argcheck(L, !luaL_getmetafield(L, 1, "__metatable"), 1, "table has a protected metatable");
 
-    Table* tt = luaH_clone(L, hvalue(L->base));
+    Table* from = hvalue(L->base);
+    luau_chargeelements(L, (unsigned long long)from->sizearray + sizenode(from));
+    Table* tt = luaH_clone(L, from);
 
     TValue v;
     sethvalue(L, &v, tt);

@@ -1,6 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 // This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
 #include "lualib.h"
+#include "lvm.h"
 
 #include "lstring.h"
 
@@ -38,7 +39,10 @@ static int str_sub(lua_State* L)
     if (end > (int)l)
         end = (int)l;
     if (start <= end)
+    {
+        luau_chargebytes(L, end - start + 1);
         lua_pushlstring(L, s + start - 1, end - start + 1);
+    }
     else
         lua_pushliteral(L, "");
     return 1;
@@ -48,6 +52,7 @@ static int str_reverse(lua_State* L)
 {
     size_t l;
     const char* s = luaL_checklstring(L, 1, &l);
+    luau_chargebytes(L, l);
     luaL_Strbuf b;
     char* ptr = luaL_buffinitsize(L, &b, l);
     while (l--)
@@ -60,6 +65,7 @@ static int str_lower(lua_State* L)
 {
     size_t l;
     const char* s = luaL_checklstring(L, 1, &l);
+    luau_chargebytes(L, l);
     luaL_Strbuf b;
     char* ptr = luaL_buffinitsize(L, &b, l);
     for (size_t i = 0; i < l; i++)
@@ -72,6 +78,7 @@ static int str_upper(lua_State* L)
 {
     size_t l;
     const char* s = luaL_checklstring(L, 1, &l);
+    luau_chargebytes(L, l);
     luaL_Strbuf b;
     char* ptr = luaL_buffinitsize(L, &b, l);
     for (size_t i = 0; i < l; i++)
@@ -94,6 +101,8 @@ static int str_rep(lua_State* L)
 
     if (l > MAXSSIZE / (size_t)n) // may overflow?
         luaL_error(L, "resulting string too large");
+
+    luau_chargebytes(L, l * n);
 
     luaL_Strbuf b;
     char* ptr = luaL_buffinitsize(L, &b, l * n);
@@ -142,6 +151,7 @@ static int str_byte(lua_State* L)
     if (posi + n <= pose) // overflow?
         luaL_error(L, "string slice too long");
     luaL_checkstack(L, n, "string slice too long");
+    luau_chargeelements(L, n);
     for (i = 0; i < n; i++)
         lua_pushinteger(L, uchar(s[posi + i - 1]));
     return n;
@@ -150,6 +160,7 @@ static int str_byte(lua_State* L)
 static int str_char(lua_State* L)
 {
     int n = lua_gettop(L); // number of arguments
+    luau_chargeelements(L, n);
 
     luaL_Strbuf b;
     char* ptr = luaL_buffinitsize(L, &b, n);
@@ -346,16 +357,21 @@ static const char* matchbalance(MatchState* ms, const char* s, const char* p)
         int b = *p;
         int e = *(p + 1);
         int cont = 1;
+        const char* from = s;
         while (++s < ms->src_end)
         {
             if (*s == e)
             {
                 if (--cont == 0)
+                {
+                    luau_chargeelements(ms->L, s - from);
                     return s + 1;
+                }
             }
             else if (*s == b)
                 cont++;
         }
+        luau_chargeelements(ms->L, s - from);
     }
     return NULL; // string ends out of balance
 }
@@ -365,6 +381,7 @@ static const char* max_expand(MatchState* ms, const char* s, const char* p, cons
     ptrdiff_t i = 0; // counts maximum expand for item
     while (singlematch(ms, s + i, p, ep))
         i++;
+    luau_chargeelements(ms->L, i);
     // keeps trying to match with the maximum repetitions
     while (i >= 0)
     {
@@ -431,6 +448,8 @@ static const char* match(MatchState* ms, const char* s, const char* p)
         luaL_error(ms->L, "pattern too complex");
 
     lua_State* L = ms->L;
+    // A step of the matcher: a pattern that backtracks takes many, and each is paid for.
+    luau_chargefuel(L, 1);
     void (*interrupt)(lua_State*, int) = L->global->cb.interrupt;
 
     if (LUAU_UNLIKELY(!!interrupt))
@@ -575,7 +594,7 @@ init: // using goto's to optimize tail recursion
     return s;
 }
 
-static const char* lmemfind(const char* s1, size_t l1, const char* s2, size_t l2)
+static const char* lmemfind(lua_State* L, const char* s1, size_t l1, const char* s2, size_t l2)
 {
     if (l2 == 0)
         return s1; // empty strings are everywhere
@@ -586,8 +605,11 @@ static const char* lmemfind(const char* s1, size_t l1, const char* s2, size_t l2
         const char* init; // to search for a `*s2' inside `s1'
         l2--;             // 1st char will be checked by `memchr'
         l1 = l1 - l2;     // `s2' cannot be found after that
+        // The bytes scanned for the first char, and each candidate's comparison, are paid for.
+        luau_chargebytes(L, l1);
         while (l1 > 0 && (init = (const char*)memchr(s1, *s2, l1)) != NULL)
         {
+            luau_chargebytes(L, l2 + LUAU_FUEL_BYTES);
             init++; // 1st char is already checked
             if (memcmp(init, s2 + 1, l2) == 0)
                 return init - 1;
@@ -677,7 +699,7 @@ static int str_find_aux(lua_State* L, int find)
     if (find && (lua_toboolean(L, 4) || nospecials(p, lp)))
     {
         // do a plain search
-        const char* s2 = lmemfind(s + init - 1, ls - init + 1, p, lp);
+        const char* s2 = lmemfind(L, s + init - 1, ls - init + 1, p, lp);
         if (s2)
         {
             lua_pushinteger(L, (int)(s2 - s + 1));
@@ -868,6 +890,8 @@ static int str_gsub(lua_State* L)
     }
     luaL_addlstring(&b, src, ms.src_end - src);
     luaL_pushresult(&b);
+    // What it wrote, as well as the steps it took to find it.
+    luau_chargebytes(L, lua_objlen(L, -1));
     lua_pushinteger(L, n); // number of substitutions
     return 2;
 }
@@ -1064,6 +1088,8 @@ static int str_format(lua_State* L)
         }
     }
     luaL_pushresult(&b);
+    // What it wrote: a width or a long string can make it far longer than its format.
+    luau_chargebytes(L, lua_objlen(L, -1));
     return 1;
 }
 
@@ -1079,6 +1105,8 @@ static int str_split(lua_State* L)
     const char* spanStart = begin;
     int numMatches = 0;
 
+    // Each place it looks compares the needle there.
+    luau_chargebytes(L, (unsigned long long)haystackLen * (needleLen + 1));
     lua_createtable(L, 0, 0);
 
     if (needleLen == 0)

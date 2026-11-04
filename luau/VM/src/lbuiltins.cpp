@@ -344,7 +344,11 @@ static int luauF_pow(lua_State* L, StkId res, TValue* arg0, int nresults, StkId 
     {
         double a1 = nvalue(arg0);
         double a2 = nvalue(args);
-        setnvalue(res, pow(a1, a2));
+        double r;
+        // A fractional exponent takes the slow way, which refuses it.
+        if (!luai_wholepow(a1, a2, &r))
+            return -1;
+        setnvalue(res, r);
         return 1;
     }
 
