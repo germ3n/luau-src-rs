@@ -3,6 +3,7 @@
 #include "lualib.h"
 
 #include "lstate.h"
+#include "lnumutils.h"
 #include "lapi.h"
 #include "ldo.h"
 #include "lgc.h"
@@ -42,7 +43,8 @@ static int luaB_tonumber(lua_State* L)
     { // standard conversion
         int isnum = 0;
         double n = lua_tonumberx(L, 1, &isnum);
-        if (isnum)
+        // Numbers are whole (see luai_iswhole): text that reads as a fraction is not one.
+        if (isnum && luai_iswhole(n))
         {
             lua_pushnumber(L, n);
             return 1;
@@ -60,8 +62,8 @@ static int luaB_tonumber(lua_State* L)
         { // at least one valid digit?
             while (isspace((unsigned char)(*s2)))
                 s2++; // skip trailing spaces
-            if (*s2 == '\0')
-            { // no invalid trailing characters?
+            if (*s2 == '\0' && n <= (unsigned long long)LUAI_MAXWHOLE)
+            { // no invalid trailing characters, and a whole number within 2^53?
                 lua_pushnumber(L, (double)n);
                 return 1;
             }

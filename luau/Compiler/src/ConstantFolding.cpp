@@ -8,6 +8,7 @@
 
 #include <vector>
 #include <math.h>
+#include <stdint.h>
 
 namespace
 {
@@ -34,6 +35,48 @@ static inline bool wholePow(double a, double b, double* result)
 
     *result = b < 0 ? 1.0 / r : r;
     return true;
+}
+
+// Numbers are whole in this fork, within 2^53 - 1 either way, as the VM's luai_iswhole has them:
+// a fraction, an infinity or a number past the bound is never folded, so the VM computes it, and
+// refuses it, at run time. A division, floor division or remainder is folded as the VM works it
+// out, in integers, or not at all.
+static inline bool isWhole(double n)
+{
+    return fabs(n) <= 9007199254740991.0 && n == floor(n);
+}
+
+static inline double wholeDiv(double a, double b)
+{
+    if (!isWhole(a) || !isWhole(b) || b == 0)
+        return NAN;
+
+    int64_t x = int64_t(a), y = int64_t(b);
+    return x % y == 0 ? double(x / y) : NAN;
+}
+
+static inline double wholeIDiv(double a, double b)
+{
+    if (!isWhole(a) || !isWhole(b) || b == 0)
+        return NAN;
+
+    int64_t x = int64_t(a), y = int64_t(b);
+    int64_t q = x / y;
+    if (x % y != 0 && ((x < 0) != (y < 0)))
+        q -= 1;
+    return double(q);
+}
+
+static inline double wholeMod(double a, double b)
+{
+    if (!isWhole(a) || !isWhole(b) || b == 0)
+        return NAN;
+
+    int64_t x = int64_t(a), y = int64_t(b);
+    int64_t r = x % y;
+    if (r != 0 && ((r < 0) != (y < 0)))
+        r += y;
+    return double(r);
 }
 
 }
@@ -301,7 +344,7 @@ static void foldBinary(Constant& result, AstExprBinary::Op op, const Constant& l
         if (la.type == Constant::Type_Number && ra.type == Constant::Type_Number)
         {
             result.type = Constant::Type_Number;
-            result.valueNumber = la.valueNumber / ra.valueNumber;
+            result.valueNumber = wholeDiv(la.valueNumber, ra.valueNumber);
         }
         else if (la.type == Constant::Type_Vectorf && ra.type == Constant::Type_Vectorf)
         {
@@ -393,7 +436,7 @@ static void foldBinary(Constant& result, AstExprBinary::Op op, const Constant& l
         if (la.type == Constant::Type_Number && ra.type == Constant::Type_Number)
         {
             result.type = Constant::Type_Number;
-            result.valueNumber = floor(la.valueNumber / ra.valueNumber);
+            result.valueNumber = wholeIDiv(la.valueNumber, ra.valueNumber);
         }
         else if (la.type == Constant::Type_Vectorf && ra.type == Constant::Type_Vectorf)
         {
@@ -485,7 +528,7 @@ static void foldBinary(Constant& result, AstExprBinary::Op op, const Constant& l
         if (la.type == Constant::Type_Number && ra.type == Constant::Type_Number)
         {
             result.type = Constant::Type_Number;
-            result.valueNumber = la.valueNumber - floor(la.valueNumber / ra.valueNumber) * ra.valueNumber;
+            result.valueNumber = wholeMod(la.valueNumber, ra.valueNumber);
         }
         break;
 
@@ -1159,6 +1202,9 @@ struct ConstantVisitor : AstVisitor
         {
             LUAU_ASSERT(!"Unknown expression type");
         }
+
+        if (result.type == Constant::Type_Number && !isWhole(result.valueNumber))
+            result.type = Constant::Type_Unknown;
 
         recordConstant(constants, node, result);
 

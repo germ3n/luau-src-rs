@@ -116,6 +116,64 @@ inline double luai_numidiv(double a, double b)
 }
 LUAU_FASTMATH_END
 
+// Numbers are whole in this fork, within 2^53 - 1 either way: the whole numbers a double holds
+// exactly. A sum, difference or product of two of them is exact while its true value is within the
+// bound, and rounds to 2^53 or past it when it is not, so checking each result is enough to keep
+// every number exact. A division, floor division or remainder of two of them is worked out in
+// integers instead, as a quotient that is not whole can round to one, and floor(a / b) can round
+// to the wrong side. Anything else, a fraction, an infinity or NaN, is refused where it is made.
+#define LUAI_MAXWHOLE 9007199254740991.0
+
+#define LUAU_NOT_WHOLE "numbers are whole, within 2^53 either way: this would be a fraction, infinite or past 2^53 (divide with //, or use the integer types)"
+
+inline bool luai_iswhole(double n)
+{
+    return fabs(n) <= LUAI_MAXWHOLE && n == floor(n);
+}
+
+// a / b when it divides evenly, else NaN, which the caller refuses; a fraction from the host
+// divides as a double and is checked like any result
+inline double luai_wholediv(double a, double b)
+{
+    if (!luai_iswhole(a) || !luai_iswhole(b))
+        return a / b;
+    if (b == 0)
+        return NAN;
+
+    int64_t x = int64_t(a), y = int64_t(b);
+    return x % y == 0 ? double(x / y) : NAN;
+}
+
+// floor(a / b), exactly
+inline double luai_wholeidiv(double a, double b)
+{
+    if (!luai_iswhole(a) || !luai_iswhole(b))
+        return luai_numidiv(a, b);
+    if (b == 0)
+        return NAN;
+
+    int64_t x = int64_t(a), y = int64_t(b);
+    int64_t q = x / y;
+    if (x % y != 0 && ((x < 0) != (y < 0)))
+        q -= 1;
+    return double(q);
+}
+
+// a - floor(a / b) * b, exactly: the remainder takes the divisor's sign, as Lua's does
+inline double luai_wholemod(double a, double b)
+{
+    if (!luai_iswhole(a) || !luai_iswhole(b))
+        return luai_nummod(a, b);
+    if (b == 0)
+        return NAN;
+
+    int64_t x = int64_t(a), y = int64_t(b);
+    int64_t r = x % y;
+    if (r != 0 && ((r < 0) != (y < 0)))
+        r += y;
+    return double(r);
+}
+
 inline float luai_lerpf(float a, float b, float t)
 {
     return (t == 1.0f) ? b : a + (b - a) * t;

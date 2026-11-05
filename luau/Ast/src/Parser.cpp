@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 LUAU_FASTINTVARIABLE(LuauRecursionLimit, 1000)
 LUAU_FASTINTVARIABLE(LuauTypeLengthLimit, 1000)
@@ -5315,6 +5316,10 @@ AstExpr* Parser::parseNumber()
 
         if (result == ConstantNumberParseResult::Malformed)
             return reportExprError(start, {}, "Malformed number");
+
+        // Numbers are whole in this fork, within 2^53 - 1 either way (see the VM's luai_iswhole).
+        if (!(fabs(value) <= 9007199254740991.0 && value == floor(value)))
+            return reportExprError(start, {}, "Numbers are whole, within 2^53 either way: %s is not", scratchData.c_str());
 
         AstExprConstantNumber* node = allocator.alloc<AstExprConstantNumber>(start, value, result);
         if (options.storeCstData)

@@ -76,6 +76,19 @@ LUAU_FASTFLAG(LuauRuntimeFeedback)
 // Some external functions can cause an error, but never reallocate the stack; for these, VM_PROTECT_PC() is
 // a cheaper version of VM_PROTECT that can be called before the external call.
 #define VM_PROTECT_PC() L->ci->savedpc = pc
+
+// Stores an arithmetic result in ra once it is whole and within 2^53 (see luai_iswhole), and
+// otherwise raises, pointing at this instruction, as a fractional power does.
+#define VM_SETWHOLE(value) \
+    { \
+        double whole_ = (value); \
+        if (LUAU_UNLIKELY(!luai_iswhole(whole_))) \
+        { \
+            L->ci->savedpc = pc; \
+            luaG_runerror(L, LUAU_NOT_WHOLE); \
+        } \
+        setnvalue(ra, whole_); \
+    }
 #define VM_ASSERT_PC(pc) LUAU_ASSERT(unsigned(pc - L->ci->p->code) < unsigned(L->ci->p->sizecode));
 
 #define VM_REG(i) (LUAU_ASSERT(unsigned(i) < unsigned(L->top - base)), &base[i])
@@ -1912,7 +1925,7 @@ reentry:
                 // fast-path
                 if (LUAU_LIKELY(ttisnumber(rb) && ttisnumber(rc)))
                 {
-                    setnvalue(ra, nvalue(rb) + nvalue(rc));
+                    VM_SETWHOLE(nvalue(rb) + nvalue(rc));
                     VM_NEXT();
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
@@ -1959,7 +1972,7 @@ reentry:
                 // fast-path
                 if (LUAU_LIKELY(ttisnumber(rb) && ttisnumber(rc)))
                 {
-                    setnvalue(ra, nvalue(rb) - nvalue(rc));
+                    VM_SETWHOLE(nvalue(rb) - nvalue(rc));
                     VM_NEXT();
                 }
                 else if (ttisvector(rb) && ttisvector(rc))
@@ -2006,7 +2019,7 @@ reentry:
                 // fast-path
                 if (LUAU_LIKELY(ttisnumber(rb) && ttisnumber(rc)))
                 {
-                    setnvalue(ra, nvalue(rb) * nvalue(rc));
+                    VM_SETWHOLE(nvalue(rb) * nvalue(rc));
                     VM_NEXT();
                 }
                 else if (ttisvector(rb) && ttisnumber(rc))
@@ -2068,7 +2081,7 @@ reentry:
                 // fast-path
                 if (LUAU_LIKELY(ttisnumber(rb) && ttisnumber(rc)))
                 {
-                    setnvalue(ra, nvalue(rb) / nvalue(rc));
+                    VM_SETWHOLE(luai_wholediv(nvalue(rb), nvalue(rc)));
                     VM_NEXT();
                 }
                 else if (ttisvector(rb) && ttisnumber(rc))
@@ -2130,7 +2143,7 @@ reentry:
                 // fast-path
                 if (LUAU_LIKELY(ttisnumber(rb) && ttisnumber(rc)))
                 {
-                    setnvalue(ra, luai_numidiv(nvalue(rb), nvalue(rc)));
+                    VM_SETWHOLE(luai_wholeidiv(nvalue(rb), nvalue(rc)));
                     VM_NEXT();
                 }
                 else if (ttisvector(rb) && ttisnumber(rc))
@@ -2187,7 +2200,7 @@ reentry:
                 {
                     double nb = nvalue(rb);
                     double nc = nvalue(rc);
-                    setnvalue(ra, luai_nummod(nb, nc));
+                    VM_SETWHOLE(luai_wholemod(nb, nc));
                     VM_NEXT();
                 }
                 else
@@ -2215,7 +2228,7 @@ reentry:
                         L->ci->savedpc = pc;
                         luaG_runerror(L, LUAU_FRACTIONAL_POWER);
                     }
-                    setnvalue(ra, r);
+                    VM_SETWHOLE(r);
                     VM_NEXT();
                 }
                 else
@@ -2237,7 +2250,7 @@ reentry:
                 // fast-path
                 if (ttisnumber(rb))
                 {
-                    setnvalue(ra, nvalue(rb) + nvalue(kv));
+                    VM_SETWHOLE(nvalue(rb) + nvalue(kv));
                     VM_NEXT();
                 }
                 else
@@ -2259,7 +2272,7 @@ reentry:
                 // fast-path
                 if (ttisnumber(rb))
                 {
-                    setnvalue(ra, nvalue(rb) - nvalue(kv));
+                    VM_SETWHOLE(nvalue(rb) - nvalue(kv));
                     VM_NEXT();
                 }
                 else
@@ -2281,7 +2294,7 @@ reentry:
                 // fast-path
                 if (LUAU_LIKELY(ttisnumber(rb)))
                 {
-                    setnvalue(ra, nvalue(rb) * nvalue(kv));
+                    VM_SETWHOLE(nvalue(rb) * nvalue(kv));
                     VM_NEXT();
                 }
                 else if (ttisvector(rb))
@@ -2328,7 +2341,7 @@ reentry:
                 // fast-path
                 if (LUAU_LIKELY(ttisnumber(rb)))
                 {
-                    setnvalue(ra, nvalue(rb) / nvalue(kv));
+                    VM_SETWHOLE(luai_wholediv(nvalue(rb), nvalue(kv)));
                     VM_NEXT();
                 }
                 else if (ttisvector(rb))
@@ -2375,7 +2388,7 @@ reentry:
                 // fast-path
                 if (LUAU_LIKELY(ttisnumber(rb)))
                 {
-                    setnvalue(ra, luai_numidiv(nvalue(rb), nvalue(kv)));
+                    VM_SETWHOLE(luai_wholeidiv(nvalue(rb), nvalue(kv)));
                     VM_NEXT();
                 }
                 else if (ttisvector(rb))
@@ -2431,7 +2444,7 @@ reentry:
                 {
                     double nb = nvalue(rb);
                     double nk = nvalue(kv);
-                    setnvalue(ra, luai_nummod(nb, nk));
+                    VM_SETWHOLE(luai_wholemod(nb, nk));
                     VM_NEXT();
                 }
                 else
@@ -2464,7 +2477,7 @@ reentry:
                         luaG_runerror(L, LUAU_FRACTIONAL_POWER);
                     }
 
-                    setnvalue(ra, r);
+                    VM_SETWHOLE(r);
                     VM_NEXT();
                 }
                 else
@@ -3327,7 +3340,7 @@ reentry:
                 // fast-path
                 if (ttisnumber(rc))
                 {
-                    setnvalue(ra, nvalue(kv) - nvalue(rc));
+                    VM_SETWHOLE(nvalue(kv) - nvalue(rc));
                     VM_NEXT();
                 }
                 else
@@ -3349,7 +3362,7 @@ reentry:
                 // fast-path
                 if (LUAU_LIKELY(ttisnumber(rc)))
                 {
-                    setnvalue(ra, nvalue(kv) / nvalue(rc));
+                    VM_SETWHOLE(luai_wholediv(nvalue(kv), nvalue(rc)));
                     VM_NEXT();
                 }
                 else if (ttisvector(rc))

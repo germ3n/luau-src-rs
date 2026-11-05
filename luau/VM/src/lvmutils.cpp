@@ -694,42 +694,44 @@ void luaV_doarithimpl(lua_State* L, StkId ra, const TValue* rb, const TValue* rc
     if ((b = luaV_tonumber(rb, &tempb)) != NULL && (c = luaV_tonumber(rc, &tempc)) != NULL)
     {
         double nb = nvalue(b), nc = nvalue(c);
+        double r = 0;
 
+        // Numbers are whole, as in luau_execute's fast paths: see luai_iswhole.
         switch (op)
         {
         case TM_ADD:
-            setnvalue(ra, luai_numadd(nb, nc));
+            r = luai_numadd(nb, nc);
             break;
         case TM_SUB:
-            setnvalue(ra, luai_numsub(nb, nc));
+            r = luai_numsub(nb, nc);
             break;
         case TM_MUL:
-            setnvalue(ra, luai_nummul(nb, nc));
+            r = luai_nummul(nb, nc);
             break;
         case TM_DIV:
-            setnvalue(ra, luai_numdiv(nb, nc));
+            r = luai_wholediv(nb, nc);
             break;
         case TM_IDIV:
-            setnvalue(ra, luai_numidiv(nb, nc));
+            r = luai_wholeidiv(nb, nc);
             break;
         case TM_MOD:
-            setnvalue(ra, luai_nummod(nb, nc));
+            r = luai_wholemod(nb, nc);
             break;
         case TM_POW:
-        {
-            double r;
             if (!luai_wholepow(nb, nc, &r))
                 luaG_runerror(L, LUAU_FRACTIONAL_POWER);
-            setnvalue(ra, r);
             break;
-        }
         case TM_UNM:
-            setnvalue(ra, luai_numunm(nb));
+            r = luai_numunm(nb);
             break;
         default:
             LUAU_ASSERT(0);
             break;
         }
+
+        if (!luai_iswhole(r))
+            luaG_runerror(L, LUAU_NOT_WHOLE);
+        setnvalue(ra, r);
     }
     else
     {
