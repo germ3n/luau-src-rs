@@ -3,6 +3,7 @@
 
 #include "Luau/Ast.h"
 #include "Luau/Bytecode.h"
+#include "Luau/Compiler.h"
 #include "Luau/DenseHash.h"
 #include "ValueTracking.h"
 
@@ -19,9 +20,10 @@ struct BuiltinAstTypes
     {
     }
 
-    // AstName use here will not match the AstNameTable, but the was we use them here always force a full string compare
+    // AstName use here will not match the AstNameTable, but the way we use them here always forces a full string compare
     AstTypeReference booleanType{{}, std::nullopt, AstName{"boolean"}, std::nullopt, {}};
     AstTypeReference numberType{{}, std::nullopt, AstName{"number"}, std::nullopt, {}};
+    AstTypeReference integerType{{}, std::nullopt, AstName{"integer"}, std::nullopt, {}};
     AstTypeReference stringType{{}, std::nullopt, AstName{"string"}, std::nullopt, {}};
     AstTypeReference vectorType{{}, std::nullopt, AstName{"vector"}, std::nullopt, {}};
 
@@ -38,6 +40,7 @@ void buildTypeMap(
     const BuiltinAstTypes& builtinTypes,
     const DenseHashMap<AstExprCall*, int>& builtinCalls,
     const DenseHashMap<AstName, Compile::Global>& globals,
+    LibraryMemberTypeCallback libraryMemberTypeCb,
     BytecodeBuilder& bytecode
 );
 

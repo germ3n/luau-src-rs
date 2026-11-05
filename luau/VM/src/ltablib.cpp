@@ -11,6 +11,8 @@
 #include "ldebug.h"
 #include "lvm.h"
 
+LUAU_DYNAMIC_FASTFLAGVARIABLE(LuauTableFindImprovement, false)
+
 static int foreachi(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -53,7 +55,7 @@ static int maxn(lua_State* L)
     double max = 0;
     luaL_checktype(L, 1, LUA_TTABLE);
 
-    Table* t = hvalue(L->base);
+    LuaTable* t = hvalue(L->base);
     luau_chargeelements(L, (unsigned long long)t->sizearray + sizenode(t));
 
     for (int i = 0; i < t->sizearray; i++)
@@ -86,10 +88,36 @@ static int getn(lua_State* L)
     return 1;
 }
 
-static void moveelements(lua_State* L, int srct, int dstt, int f, int e, int t)
+static bool shouldsparsemove(LuaTable* src, LuaTable* dst, int n)
 {
-    Table* src = hvalue(L->base + (srct - 1));
-    Table* dst = hvalue(L->base + (dstt - 1));
+    int srcelems = src->sizearray + sizenode(src);
+    int dstelems = dst->sizearray + sizenode(dst);
+    int maxelems = srcelems > dstelems ? srcelems : dstelems;
+    const int minsparsemoveelems = 32;
+
+    return n > minsparsemoveelems && n / 2 > maxelems;
+}
+
+static bool tovalidintkey(lua_State* L, int idx, int f, int e, int* result)
+{
+    if (lua_type(L, idx) == LUA_TNUMBER)
+    {
+        double nkey = lua_tonumber(L, idx);
+
+        if (nkey >= f && nkey <= e)
+        {
+            luai_num2int(*result, nkey);
+            return luai_numeq(cast_num(*result), nkey);
+        }
+    }
+
+    return false;
+}
+
+static void moveelements(lua_State* L, int srct, int dstt, int f, int e, int t, bool sparsemove)
+{
+    LuaTable* src = hvalue(L->base + (srct - 1));
+    LuaTable* dst = hvalue(L->base + (dstt - 1));
 
     if (dst->readonly)
         luaG_readonlyerror(L);
@@ -99,10 +127,8 @@ static void moveelements(lua_State* L, int srct, int dstt, int f, int e, int t)
     if (n > 0)
         luau_chargeelements(L, n);
 
-    if (cast_to(unsigned int, f - 1) < cast_to(unsigned int, src->sizearray) &&
-        cast_to(unsigned int, t - 1) < cast_to(unsigned int, dst->sizearray) &&
-        cast_to(unsigned int, f - 1 + n) <= cast_to(unsigned int, src->sizearray) &&
-        cast_to(unsigned int, t - 1 + n) <= cast_to(unsigned int, dst->sizearray))
+    if (unsigned(f) - 1 < unsigned(src->sizearray) && unsigned(t) - 1 < unsigned(dst->sizearray) &&
+        unsigned(f) - 1 + unsigned(n) <= unsigned(src->sizearray) && unsigned(t) - 1 + unsigned(n) <= unsigned(dst->sizearray))
     {
         TValue* srcarray = src->array;
         TValue* dstarray = dst->array;
@@ -127,6 +153,51 @@ static void moveelements(lua_State* L, int srct, int dstt, int f, int e, int t)
         }
 
         luaC_barrierfast(L, dst);
+    }
+    else if (sparsemove)
+    {
+        int srcta = lua_absindex(L, srct);
+        int dstta = lua_absindex(L, dstt);
+
+        int te = t + (n - 1);
+
+        // temporary table to hold elements from source that are being moved
+        lua_newtable(L);
+
+        // collect integer key elements that are being moved
+        for (int iter = 0; (iter = lua_rawiter(L, srcta, iter)) != -1;)
+        {
+            int ikey = 0;
+            if (tovalidintkey(L, -2, f, e, &ikey))
+                lua_rawseti(L, -3, ikey); // pops value
+            else
+                lua_pop(L, 1); // pop value
+
+            lua_pop(L, 1); // pop key
+        }
+
+        // clear the destination range
+        for (int iter = 0; (iter = lua_rawiter(L, dstta, iter)) != -1;)
+        {
+            int ikey = 0;
+            if (tovalidintkey(L, -2, t, te, &ikey))
+            {
+                lua_pushnil(L);
+                lua_rawseti(L, dstta, ikey);
+            }
+
+            lua_pop(L, 2);
+        }
+
+        // copy the elements from the temporary table to the destination table
+        for (int iter = 0; (iter = lua_rawiter(L, -1, iter)) != -1;)
+        {
+            int ikey = lua_tointeger(L, -2);
+            lua_rawseti(L, dstta, ikey - f + t);
+            lua_pop(L, 1);
+        }
+
+        lua_pop(L, 1);
     }
     else
     {
@@ -167,7 +238,7 @@ static int tinsert(lua_State* L)
 
         // move up elements if necessary
         if (1 <= pos && pos <= n)
-            moveelements(L, 1, 1, pos, n, pos + 1);
+            moveelements(L, 1, 1, pos, n, pos + 1, /* sparsemove */ false);
         break;
     }
     default:
@@ -189,7 +260,7 @@ static int tremove(lua_State* L)
         return 0;                // nothing to remove
     lua_rawgeti(L, 1, pos);      // result = t[pos]
 
-    moveelements(L, 1, 1, pos + 1, n, pos);
+    moveelements(L, 1, 1, pos + 1, n, pos, /* sparsemove */ false);
 
     lua_pushnil(L);
     lua_rawseti(L, 1, n); // t[n] = nil
@@ -217,23 +288,25 @@ static int tmove(lua_State* L)
         int n = e - f + 1; // number of elements to move
         luaL_argcheck(L, t <= INT_MAX - n + 1, 4, "destination wrap around");
 
-        Table* dst = hvalue(L->base + (tt - 1));
+        LuaTable* dst = hvalue(L->base + (tt - 1));
 
         if (dst->readonly) // also checked in moveelements, but this blocks resizes of r/o tables
             luaG_readonlyerror(L);
+
+        bool sparsemove = shouldsparsemove(hvalue(L->base), dst, n);
 
         if (t > 0 && (t - 1) <= dst->sizearray && (t - 1 + n) > dst->sizearray)
         { // grow the destination table array
             luaH_resizearray(L, dst, t - 1 + n);
         }
 
-        moveelements(L, 1, tt, f, e, t);
+        moveelements(L, 1, tt, f, e, t, sparsemove);
     }
     lua_pushvalue(L, tt); // return destination table
     return 1;
 }
 
-static void addfield(lua_State* L, luaL_Strbuf* b, int i, Table* t)
+static void addfield(lua_State* L, luaL_Strbuf* b, int i, LuaTable* t)
 {
     if (t && unsigned(i - 1) < unsigned(t->sizearray) && ttisstring(&t->array[i - 1]))
     {
@@ -257,7 +330,7 @@ static int tconcat(lua_State* L)
     int i = luaL_optinteger(L, 3, 1);
     int last = luaL_opt(L, luaL_checkinteger, 4, lua_objlen(L, 1));
 
-    Table* t = hvalue(L->base);
+    LuaTable* t = hvalue(L->base);
 
     luaL_Strbuf b;
     luaL_buffinit(L, &b);
@@ -280,7 +353,7 @@ static int tpack(lua_State* L)
     int n = lua_gettop(L);    // number of elements to pack
     lua_createtable(L, n, 1); // create result table
 
-    Table* t = hvalue(L->top - 1);
+    LuaTable* t = hvalue(L->top - 1);
 
     for (int i = 0; i < n; ++i)
     {
@@ -298,7 +371,7 @@ static int tpack(lua_State* L)
 static int tunpack(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
-    Table* t = hvalue(L->base);
+    LuaTable* t = hvalue(L->base);
 
     int i = luaL_optinteger(L, 2, 1);
     int e = luaL_opt(L, luaL_checkinteger, 3, lua_objlen(L, 1));
@@ -341,7 +414,7 @@ static int sort_func(lua_State* L, const TValue* l, const TValue* r)
     return !l_isfalse(L->top);
 }
 
-inline void sort_swap(lua_State* L, Table* t, int i, int j)
+inline void sort_swap(lua_State* L, LuaTable* t, int i, int j)
 {
     TValue* arr = t->array;
     int n = t->sizearray;
@@ -354,7 +427,7 @@ inline void sort_swap(lua_State* L, Table* t, int i, int j)
     setobj2t(L, &arr[j], &temp);
 }
 
-inline int sort_less(lua_State* L, Table* t, int i, int j, SortPredicate pred)
+inline int sort_less(lua_State* L, LuaTable* t, int i, int j, SortPredicate pred)
 {
     TValue* arr = t->array;
     int n = t->sizearray;
@@ -369,7 +442,7 @@ inline int sort_less(lua_State* L, Table* t, int i, int j, SortPredicate pred)
     return res;
 }
 
-static void sort_siftheap(lua_State* L, Table* t, int l, int u, SortPredicate pred, int root)
+static void sort_siftheap(lua_State* L, LuaTable* t, int l, int u, SortPredicate pred, int root)
 {
     LUAU_ASSERT(l <= u);
     int count = u - l + 1;
@@ -395,7 +468,7 @@ static void sort_siftheap(lua_State* L, Table* t, int l, int u, SortPredicate pr
         sort_swap(L, t, l + root, l + lastleft);
 }
 
-static void sort_heap(lua_State* L, Table* t, int l, int u, SortPredicate pred)
+static void sort_heap(lua_State* L, LuaTable* t, int l, int u, SortPredicate pred)
 {
     LUAU_ASSERT(l <= u);
     int count = u - l + 1;
@@ -410,7 +483,7 @@ static void sort_heap(lua_State* L, Table* t, int l, int u, SortPredicate pred)
     }
 }
 
-static void sort_rec(lua_State* L, Table* t, int l, int u, int limit, SortPredicate pred)
+static void sort_rec(lua_State* L, LuaTable* t, int l, int u, int limit, SortPredicate pred)
 {
     // sort range [l..u] (inclusive, 0-based)
     while (l < u)
@@ -483,7 +556,7 @@ static void sort_rec(lua_State* L, Table* t, int l, int u, int limit, SortPredic
 static int tsort(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
-    Table* t = hvalue(L->base);
+    LuaTable* t = hvalue(L->base);
     int n = luaH_getn(t);
     if (t->readonly)
         luaG_readonlyerror(L);
@@ -519,7 +592,7 @@ static int tcreate(lua_State* L)
     if (!lua_isnoneornil(L, 2))
     {
         lua_createtable(L, size, 0);
-        Table* t = hvalue(L->top - 1);
+        LuaTable* t = hvalue(L->top - 1);
 
         StkId v = L->base + 1;
 
@@ -539,14 +612,50 @@ static int tcreate(lua_State* L)
 
 static int tfind(lua_State* L)
 {
-    luaL_checktype(L, 1, LUA_TTABLE);
-    luaL_checkany(L, 2);
-    int init = luaL_optinteger(L, 3, 1);
+    int init = 1;
+
+    if (DFFlag::LuauTableFindImprovement)
+    {
+        int nargs = int(L->top - L->base);
+
+        if (nargs < 1 || !ttistable(L->base))
+            luaL_checktype(L, 1, LUA_TTABLE);
+        if (nargs < 2)
+            luaL_checkany(L, 2);
+        if (nargs >= 3 && !ttisnil(L->base + 2))
+            init = luaL_checkinteger(L, 3);
+    }
+    else
+    {
+        luaL_checktype(L, 1, LUA_TTABLE);
+        luaL_checkany(L, 2);
+        init = luaL_optinteger(L, 3, 1);
+    }
+
     if (init < 1)
         luaL_argerror(L, 3, "index out of range");
 
-    Table* t = hvalue(L->base);
-    StkId v = L->base + 1;
+    LuaTable* t = hvalue(L->base);
+
+    if (DFFlag::LuauTableFindImprovement)
+    {
+        if (init > t->sizearray && t->node == &luaH_dummynode)
+        {
+            lua_pushnil(L);
+            return 1;
+        }
+
+        // Fast array search can only be performed when metamethod is absent/not used, as it can mutate table and relocate stack
+        if (!iscollectable(L->base + 1) || ttisnil(luaT_gettmbyobj(L, L->base + 1, TM_EQ)))
+        {
+            if (int index = luaH_rawfind(t, init, L->base + 1))
+                lua_pushinteger(L, index);
+            else
+                lua_pushnil(L);
+
+            return 1;
+        }
+    }
 
     for (int i = init;; ++i)
     {
@@ -557,6 +666,8 @@ static int tfind(lua_State* L)
         const TValue* e = luaH_getnum(t, i);
         if (ttisnil(e))
             break;
+
+        StkId v = L->base + 1;
 
         if (equalobj(L, v, e))
         {
@@ -573,7 +684,7 @@ static int tclear(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
 
-    Table* tt = hvalue(L->base);
+    LuaTable* tt = hvalue(L->base);
     if (tt->readonly)
         luaG_readonlyerror(L);
 
@@ -607,13 +718,13 @@ static int tclone(lua_State* L)
     luaL_checktype(L, 1, LUA_TTABLE);
     luaL_argcheck(L, !luaL_getmetafield(L, 1, "__metatable"), 1, "table has a protected metatable");
 
-    Table* from = hvalue(L->base);
+    LuaTable* from = hvalue(L->base);
     luau_chargeelements(L, (unsigned long long)from->sizearray + sizenode(from));
-    Table* tt = luaH_clone(L, from);
+    LuaTable* tt = luaH_clone(L, from);
 
     TValue v;
     sethvalue(L, &v, tt);
-    luaA_pushobject(L, &v);
+    luaA_pushvalue(L, &v);
 
     return 1;
 }

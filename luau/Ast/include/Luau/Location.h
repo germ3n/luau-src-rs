@@ -1,6 +1,8 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include <climits>
+
 namespace Luau
 {
 
@@ -14,14 +16,49 @@ struct Position
     {
     }
 
-    bool operator==(const Position& rhs) const;
-    bool operator!=(const Position& rhs) const;
-    bool operator<(const Position& rhs) const;
-    bool operator>(const Position& rhs) const;
-    bool operator<=(const Position& rhs) const;
-    bool operator>=(const Position& rhs) const;
+    static Position missing()
+    {
+        return {UINT_MAX, UINT_MAX};
+    }
+
+    bool operator==(const Position& rhs) const
+    {
+        return this->column == rhs.column && this->line == rhs.line;
+    }
+
+    bool operator!=(const Position& rhs) const
+    {
+        return !(*this == rhs);
+    }
+    bool operator<(const Position& rhs) const
+    {
+        if (line == rhs.line)
+            return column < rhs.column;
+        else
+            return line < rhs.line;
+    }
+    bool operator>(const Position& rhs) const
+    {
+        if (line == rhs.line)
+            return column > rhs.column;
+        else
+            return line > rhs.line;
+    }
+    bool operator<=(const Position& rhs) const
+    {
+        return *this == rhs || *this < rhs;
+    }
+    bool operator>=(const Position& rhs) const
+    {
+        return *this == rhs || *this > rhs;
+    }
 
     void shift(const Position& start, const Position& oldEnd, const Position& newEnd);
+
+    bool hasValue() const
+    {
+        return line != UINT_MAX || column != UINT_MAX;
+    }
 };
 
 struct Location
@@ -52,8 +89,14 @@ struct Location
     {
     }
 
-    bool operator==(const Location& rhs) const;
-    bool operator!=(const Location& rhs) const;
+    bool operator==(const Location& rhs) const
+    {
+        return this->begin == rhs.begin && this->end == rhs.end;
+    }
+    bool operator!=(const Location& rhs) const
+    {
+        return !(*this == rhs);
+    }
 
     bool encloses(const Location& l) const;
     bool overlaps(const Location& l) const;

@@ -6,17 +6,20 @@
 #include "Luau/Lexer.h"
 #include "Luau/StringUtils.h"
 
+#include <exception>
+
 namespace Luau
 {
 
 class AstStatBlock;
+class CstNode;
 
 class ParseError : public std::exception
 {
 public:
-    ParseError(const Location& location, const std::string& message);
+    ParseError(const Location& location, std::string message);
 
-    virtual const char* what() const throw();
+    const char* what() const throw() override;
 
     const Location& getLocation() const;
     const std::string& getMessage() const;
@@ -33,7 +36,7 @@ class ParseErrors : public std::exception
 public:
     ParseErrors(std::vector<ParseError> errors);
 
-    virtual const char* what() const throw();
+    const char* what() const throw() override;
 
     const std::vector<ParseError>& getErrors() const;
 
@@ -55,6 +58,8 @@ struct Comment
     Location location;
 };
 
+using CstNodeMap = DenseHashMap<AstNode*, CstNode*>;
+
 struct ParseResult
 {
     AstStatBlock* root;
@@ -64,8 +69,24 @@ struct ParseResult
     std::vector<ParseError> errors;
 
     std::vector<Comment> commentLocations;
+
+    CstNodeMap cstNodeMap;
 };
 
-static constexpr const char* kParseNameError = "%error-id%";
+template<typename Node>
+struct ParseNodeResult
+{
+    Node* root;
+    size_t lines = 0;
+
+    std::vector<HotComment> hotcomments;
+    std::vector<ParseError> errors;
+
+    std::vector<Comment> commentLocations;
+
+    CstNodeMap cstNodeMap;
+};
+
+inline constexpr const char* kParseNameError = "%error-id%";
 
 } // namespace Luau

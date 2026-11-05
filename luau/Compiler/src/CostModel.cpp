@@ -1,8 +1,12 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "CostModel.h"
 
+#include "Luau/Bytecode.h"
 #include "Luau/Common.h"
 #include "Luau/DenseHash.h"
+
+#include "ConstantFolding.h"
+#include "Utils.h"
 
 #include <limits.h>
 
@@ -37,25 +41,6 @@ static uint64_t parallelMulSat(uint64_t a, int b)
 
     // the low bits are now correct for values that didn't saturate, and we simply need to mask them if high bit is 1
     return r | (s - (s >> 7));
-}
-
-inline bool getNumber(AstExpr* node, double& result)
-{
-    // since constant model doesn't use constant folding atm, we perform the basic extraction that's sufficient to handle positive/negative literals
-    if (AstExprConstantNumber* ne = node->as<AstExprConstantNumber>())
-    {
-        result = ne->value;
-        return true;
-    }
-
-    if (AstExprUnary* ue = node->as<AstExprUnary>(); ue && ue->op == AstExprUnary::Minus)
-        if (AstExprConstantNumber* ne = ue->expr->as<AstExprConstantNumber>())
-        {
-            result = -ne->value;
-            return true;
-        }
-
-    return false;
 }
 
 struct Cost
@@ -114,23 +99,28 @@ struct Cost
 struct CostVisitor : AstVisitor
 {
     const DenseHashMap<AstExprCall*, int>& builtins;
+    const DenseHashMap<AstExpr*, Constant>& constants;
 
     DenseHashMap<AstLocal*, uint64_t> vars;
     Cost result;
 
-    CostVisitor(const DenseHashMap<AstExprCall*, int>& builtins)
+    CostVisitor(const DenseHashMap<AstExprCall*, int>& builtins, const DenseHashMap<AstExpr*, Constant>& constants)
         : builtins(builtins)
-        , vars(nullptr)
+        , constants(constants)
     {
     }
 
     Cost model(AstExpr* node)
     {
+        if (const Constant* c = constants.find(node))
+            return Cost(0, Cost::kLiteral);
+
         if (AstExprGroup* expr = node->as<AstExprGroup>())
         {
             return model(expr->expr);
         }
-        else if (node->is<AstExprConstantNil>() || node->is<AstExprConstantBool>() || node->is<AstExprConstantNumber>() || node->is<AstExprConstantString>())
+        else if (node->is<AstExprConstantNil>() || node->is<AstExprConstantBool>() || node->is<AstExprConstantNumber>() ||
+                 node->is<AstExprConstantString>() || node->is<AstExprConstantInteger>())
         {
             return Cost(0, Cost::kLiteral);
         }
@@ -152,8 +142,9 @@ struct CostVisitor : AstVisitor
         {
             // builtin cost modeling is different from regular calls because we use FASTCALL to compile these
             // thus we use a cheaper baseline, don't account for function, and assume constant/local copy is free
-            bool builtin = builtins.find(expr) != nullptr;
-            bool builtinShort = builtin && expr->args.size <= 2; // FASTCALL1/2
+            const int* bfid = builtins.find(expr);
+            bool builtin = bfid != nullptr && *bfid != LBF_NONE;
+            bool builtinShort = builtin && expr->args.size <= 3u; // FASTCALL1/2/3
 
             Cost cost = builtin ? 2 : 3;
 
@@ -212,7 +203,13 @@ struct CostVisitor : AstVisitor
         }
         else if (AstExprIfElse* expr = node->as<AstExprIfElse>())
         {
-            return model(expr->condition) + model(expr->trueExpr) + model(expr->falseExpr) + 2;
+            Cost cond = model(expr->condition);
+
+            // propagate constant mask from condition to the local variable if it exists
+            if (expr->conditionLocal && cond.constant != 0)
+                vars[expr->conditionLocal] = cond.constant;
+
+            return cond + model(expr->trueExpr) + model(expr->falseExpr) + 2;
         }
         else if (AstExprInterpString* expr = node->as<AstExprInterpString>())
         {
@@ -223,6 +220,10 @@ struct CostVisitor : AstVisitor
                 cost += model(innerExpression);
 
             return cost;
+        }
+        else if (AstExprInstantiate* expr = node->as<AstExprInstantiate>())
+        {
+            return model(expr->expr);
         }
         else
         {
@@ -269,6 +270,7 @@ struct CostVisitor : AstVisitor
 
         int tripCount = -1;
         double from, to, step = 1;
+
         if (getNumber(node->from, from) && getNumber(node->to, to) && (!node->step || getNumber(node->step, step)))
             tripCount = getTripCount(from, to, step);
 
@@ -289,6 +291,9 @@ struct CostVisitor : AstVisitor
     {
         Cost condition = model(node->condition);
 
+        if (node->conditionLocal && condition.constant != 0)
+            vars[node->conditionLocal] = condition.constant;
+
         loop(node->body, condition);
         return false;
     }
@@ -303,6 +308,27 @@ struct CostVisitor : AstVisitor
 
     bool visit(AstStatIf* node) override
     {
+        if (node->conditionLocal)
+        {
+            Cost arg = model(node->condition);
+
+            if (arg.constant != 0)
+                vars[node->conditionLocal] = arg.constant;
+        }
+
+        if (isConstantFalse(constants, node->condition))
+        {
+            if (node->elsebody)
+                node->elsebody->visit(this);
+            return false;
+        }
+
+        if (isConstantTrue(constants, node->condition))
+        {
+            node->thenbody->visit(this);
+            return false;
+        }
+
         // unconditional 'else' may require a jump after the 'if' body
         // note: this ignores cases when 'then' always terminates and also assumes comparison requires an extra instruction which may be false
         result += 1 + (node->elsebody && !node->elsebody->is<AstStatIf>());
@@ -368,17 +394,60 @@ struct CostVisitor : AstVisitor
 
         return false;
     }
+
+    bool getNumber(AstExpr* node, double& result)
+    {
+        if (const Constant* constant = constants.find(node))
+        {
+            if (constant->type == Constant::Type_Number)
+            {
+                result = constant->valueNumber;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool visit(AstStatBlock* node) override
+    {
+        for (size_t i = 0; i < node->body.size; ++i)
+        {
+            AstStat* stat = node->body.data[i];
+
+            stat->visit(this);
+
+            if (alwaysTerminates(constants, stat))
+                break;
+        }
+
+        return false;
+    }
 };
 
-uint64_t modelCost(AstNode* root, AstLocal* const* vars, size_t varCount, const DenseHashMap<AstExprCall*, int>& builtins)
+uint64_t modelCost(
+    AstNode* root,
+    AstLocal* const* vars,
+    size_t varCount,
+    const DenseHashMap<AstExprCall*, int>& builtins,
+    const DenseHashMap<AstExpr*, Constant>& constants
+)
 {
-    CostVisitor visitor{builtins};
+    CostVisitor visitor{builtins, constants};
     for (size_t i = 0; i < varCount && i < 7; ++i)
         visitor.vars[vars[i]] = 0xffull << (i * 8 + 8);
 
     root->visit(&visitor);
 
     return visitor.result.model;
+}
+
+uint64_t modelCost(AstNode* root, AstLocal* const* vars, size_t varCount)
+{
+    DenseHashMap<AstExprCall*, int> builtins;
+    DenseHashMap<AstExpr*, Constant> constants;
+
+    return modelCost(root, vars, varCount, builtins, constants);
 }
 
 int computeCost(uint64_t model, const bool* varsConst, size_t varCount)

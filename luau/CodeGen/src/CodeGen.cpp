@@ -3,7 +3,7 @@
 
 #include "CodeGenLower.h"
 
-#include "Luau/Common.h"
+#include "Luau/CodeGenCommon.h"
 #include "Luau/CodeAllocator.h"
 #include "Luau/CodeBlockUnwind.h"
 #include "Luau/IrBuilder.h"
@@ -41,22 +41,21 @@
 #endif
 #endif
 
-LUAU_FASTFLAGVARIABLE(DebugCodegenNoOpt)
 LUAU_FASTFLAGVARIABLE(DebugCodegenOptSize)
 LUAU_FASTFLAGVARIABLE(DebugCodegenSkipNumbering)
+LUAU_FASTFLAGVARIABLE(LuauCodegenNopPadding)
 
 // Per-module IR instruction count limit
 LUAU_FASTINTVARIABLE(CodegenHeuristicsInstructionLimit, 1'048'576) // 1 M
 
 // Per-function IR block limit
-// Current value is based on some member variables being limited to 16 bits
-// Because block check is made before optimization passes and optimization can generate new blocks, limit is lowered 2x
 // The limit will probably be adjusted in the future to avoid performance issues with analysis that's more complex than O(n)
 LUAU_FASTINTVARIABLE(CodegenHeuristicsBlockLimit, 32'768) // 32 K
 
-// Per-function IR instruction limit
-// Current value is based on some member variables being limited to 16 bits
+// Per-block IR instruction limit
 LUAU_FASTINTVARIABLE(CodegenHeuristicsBlockInstructionLimit, 65'536) // 64 K
+
+LUAU_FASTFLAGVARIABLE(LuauCodegenInteger3)
 
 namespace Luau
 {
@@ -123,14 +122,9 @@ void onDisable(lua_State* L, Proto* proto)
 
             for (CallInfo* ci = th->ci; ci > th->base_ci; ci--)
             {
-                if (isLua(ci))
+                if (isLua(ci) && ci->p == proto)
                 {
-                    Proto* p = clvalue(ci->func)->l.p;
-
-                    if (p == proto)
-                    {
-                        ci->flags &= ~LUA_CALLINFO_NATIVE;
-                    }
+                    ci->flags &= ~LUA_CALLINFO_NATIVE;
                 }
             }
 
@@ -149,7 +143,50 @@ unsigned int getCpuFeaturesA64()
     size_t jscvtLen = sizeof(jscvt);
     if (sysctlbyname("hw.optional.arm.FEAT_JSCVT", &jscvt, &jscvtLen, nullptr, 0) == 0 && jscvt == 1)
         result |= A64::Feature_JSCVT;
+
+    int advSIMD = 0;
+    size_t advSIMDLen = sizeof(advSIMD);
+    if (sysctlbyname("hw.optional.arm.AdvSIMD", &advSIMD, &advSIMDLen, nullptr, 0) == 0 && advSIMD == 1)
+        result |= A64::Feature_AdvSIMD;
 #endif
+
+    // The JITted code must match the Pointer Authentication (PAC) use of the
+    // process in which it runs, so we determine whether to use PAC based on
+    // how the hosting binary has been built, not on the hardware capabilities.
+    // (It is possible to not-use PAC on PAC-capable hardware.)
+    //
+    // Note that the two options here are separate:
+    //  * Apple arm64e makes use of both call- and ret-signing.
+    //  * Linux -mbranch-protection=pac-ret only makes use of ret-signing.
+    // (Both cases are detected and reflected in the state of the macros.)
+#ifdef CODEGEN_TARGET_A64_PTRAUTH_CALLS
+    result |= A64::Feature_PtrAuthCall;
+#endif
+#ifdef CODEGEN_TARGET_A64_PTRAUTH_RETURNS
+    result |= A64::Feature_PtrAuthRet;
+#endif
+
+    return result;
+}
+#else
+unsigned int getCpuFeaturesX64()
+{
+    unsigned int result = 0;
+
+    int cpuinfo[4] = {0, 0, 0, 0};
+#if defined(CODEGEN_TARGET_X64)
+#ifdef _MSC_VER
+    __cpuid(cpuinfo, 1);
+#else
+    __cpuid(1, cpuinfo[0], cpuinfo[1], cpuinfo[2], cpuinfo[3]);
+#endif
+#endif
+
+    if ((cpuinfo[2] & 0x00001000) != 0)
+        result |= X64::Feature_FMA3;
+
+    if ((cpuinfo[2] & 0x10000000) != 0)
+        result |= X64::Feature_AVX;
 
     return result;
 }
@@ -166,7 +203,7 @@ bool isSupported()
     if (sizeof(LuaNode) != 32)
         return false;
 
-        // Windows CRT uses stack unwinding in longjmp so we have to use unwind data; on other platforms, it's only necessary for C++ EH.
+    // Windows CRT uses stack unwinding in longjmp so we have to use unwind data; on other platforms, it's only necessary for C++ EH.
 #if defined(_WIN32)
     if (!isUnwindSupported())
         return false;
@@ -184,7 +221,7 @@ bool isSupported()
 #endif
 
     // We require AVX1 support for VEX encoded XMM operations
-    // We also requre SSE4.1 support for ROUNDSD but the AVX check below covers it
+    // We also require SSE4.1 support for ROUNDSD but the AVX check below covers it
     // https://en.wikipedia.org/wiki/CPUID#EAX=1:_Processor_Info_and_Feature_Bits
     if ((cpuinfo[2] & (1 << 28)) == 0)
         return false;

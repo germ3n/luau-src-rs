@@ -19,8 +19,9 @@ enum class Mode
 
 struct FragmentParseResumeSettings
 {
-    DenseHashMap<AstName, AstLocal*> localMap{AstName()};
+    DenseHashMap<AstName, AstLocal*> localMap;
     std::vector<AstLocal*> localStack;
+    Position resumePosition;
 };
 
 struct ParseOptions
@@ -28,6 +29,8 @@ struct ParseOptions
     bool allowDeclarationSyntax = false;
     bool captureComments = false;
     std::optional<FragmentParseResumeSettings> parseFragment = std::nullopt;
+    bool storeCstData = false;
+    bool noErrorLimit = false;
 };
 
 } // namespace Luau

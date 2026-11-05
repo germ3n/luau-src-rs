@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Represents the configuration for building Luau artifacts.
 pub struct Build {
     out_dir: Option<PathBuf>,
     target: Option<String>,
@@ -16,139 +17,177 @@ pub struct Build {
     vector_size: usize,
 }
 
+/// Represents the artifacts produced by the build process.
 pub struct Artifacts {
-    include_dir: PathBuf,
     lib_dir: PathBuf,
     libs: Vec<String>,
     cpp_stdlib: Option<String>,
 }
 
-impl Build {
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Build {
+impl Default for Build {
+    fn default() -> Self {
         Build {
-            out_dir: env::var_os("OUT_DIR").map(|s| PathBuf::from(s).join("luau-build")),
+            out_dir: env::var_os("OUT_DIR").map(PathBuf::from),
             target: env::var("TARGET").ok(),
             host: env::var("HOST").ok(),
-            max_cstack_size: 100000,
+            max_cstack_size: 1000000,
             use_longjmp: false,
             enable_codegen: false,
             vector_size: 3,
         }
     }
+}
 
+impl Build {
+    /// Creates a new `Build` instance with default settings.
+    pub fn new() -> Build {
+        Build::default()
+    }
+
+    /// Sets the output directory for the build artifacts.
+    ///
+    /// Default is the environment variable `OUT_DIR`.
     pub fn out_dir<P: AsRef<Path>>(&mut self, path: P) -> &mut Build {
         self.out_dir = Some(path.as_ref().to_path_buf());
         self
     }
 
+    /// Sets the target architecture for the build.
+    ///
+    /// Default is the environment variable `TARGET`.
     pub fn target(&mut self, target: &str) -> &mut Build {
         self.target = Some(target.to_string());
         self
     }
 
+    /// Sets the host architecture for the build.
+    ///
+    /// Default is the environment variable `HOST`.
     pub fn host(&mut self, host: &str) -> &mut Build {
         self.host = Some(host.to_string());
         self
     }
 
+    /// Sets the maximum number of Lua stack slots that a C function can use.
+    ///
+    /// Default is 1,000,000.
     pub fn set_max_cstack_size(&mut self, size: usize) -> &mut Build {
         self.max_cstack_size = size;
         self
     }
 
+    /// Sets whether to use longjmp instead of C++ exceptions.
+    ///
+    /// Default is false.
     pub fn use_longjmp(&mut self, r#use: bool) -> &mut Build {
         self.use_longjmp = r#use;
         self
     }
 
+    /// Sets whether to enable the code generator (JIT).
+    ///
+    /// Default is false.
     pub fn enable_codegen(&mut self, enable: bool) -> &mut Build {
         self.enable_codegen = enable;
         self
     }
 
+    /// Sets the vector size (3 or 4).
+    ///
+    /// Default is 3.
     pub fn set_vector_size(&mut self, size: usize) -> &mut Build {
-        assert!(size == 3 || size == 4);
+        assert!(size == 3 || size == 4, "vector size must be 3 or 4");
         self.vector_size = size;
         self
     }
 
+    /// Builds the Lua artifacts for the specified version.
     pub fn build(&mut self) -> Artifacts {
-        let target = &self.target.as_ref().expect("TARGET not set")[..];
-        let host = &self.host.as_ref().expect("HOST not set")[..];
-        let out_dir = self.out_dir.as_ref().expect("OUT_DIR not set");
-        let lib_dir = out_dir.join("lib");
-        let include_dir = out_dir.join("include");
+        let target = &self.target.as_ref().expect("TARGET is not set")[..];
+        let host = &self.host.as_ref().expect("HOST is not set")[..];
+        let out_dir = self.out_dir.as_ref().expect("OUT_DIR is not set");
+        let build_dir = out_dir.join("luau-build");
 
-        let source_dir_base = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let common_include_dir = source_dir_base.join("luau").join("Common").join("include");
-        let ast_source_dir = source_dir_base.join("luau").join("Ast").join("src");
-        let ast_include_dir = source_dir_base.join("luau").join("Ast").join("include");
-        let codegen_source_dir = source_dir_base.join("luau").join("CodeGen").join("src");
-        let codegen_include_dir = source_dir_base.join("luau").join("CodeGen").join("include");
-        let compiler_source_dir = source_dir_base.join("luau").join("Compiler").join("src");
-        let compiler_include_dir = source_dir_base
-            .join("luau")
-            .join("Compiler")
-            .join("include");
-        let custom_source_dir = source_dir_base.join("luau").join("Custom").join("src");
-        let vm_source_dir = source_dir_base.join("luau").join("VM").join("src");
-        let vm_include_dir = source_dir_base.join("luau").join("VM").join("include");
+        let source_base_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let luau_source_dir = source_base_dir.join("luau");
+        let common_include_dir = luau_source_dir.join("Common").join("include");
+        let vm_source_dir = luau_source_dir.join("VM").join("src");
+        let vm_include_dir = luau_source_dir.join("VM").join("include");
 
         // Cleanup
-        if lib_dir.exists() {
-            fs::remove_dir_all(&lib_dir).unwrap();
+        if build_dir.exists() {
+            fs::remove_dir_all(&build_dir).unwrap();
         }
-        fs::create_dir_all(&lib_dir).unwrap();
-
-        if include_dir.exists() {
-            fs::remove_dir_all(&include_dir).unwrap();
-        }
-        fs::create_dir_all(&include_dir).unwrap();
 
         // Configure C++
         let mut config = cc::Build::new();
         config
-            .target(target)
-            .host(host)
             .warnings(false)
             .cargo_metadata(false)
             .std("c++17")
             .cpp(true);
 
+        // Extra compiler flags and include directories for the vendored C++.
+        //
+        // `LUAU_CXXFLAGS` is split on whitespace and appended to the compiler
+        // command; `LUAU_INCLUDE_DIRS` uses the platform path separator. Both
+        // are declared with `rerun-if-env-changed`, so changing either forces a
+        // rebuild instead of silently reusing an artifact built with the old
+        // settings.
+        println!("cargo:rerun-if-env-changed=LUAU_CXXFLAGS");
+        println!("cargo:rerun-if-env-changed=LUAU_INCLUDE_DIRS");
+        if let Ok(flags) = env::var("LUAU_CXXFLAGS") {
+            for flag in flags.split_whitespace() {
+                config.flag(flag);
+            }
+        }
+        if let Ok(dirs) = env::var("LUAU_INCLUDE_DIRS") {
+            for dir in env::split_paths(&dirs) {
+                config.include(dir);
+            }
+        }
+
         if target.ends_with("emscripten") {
-            // Enable c++ exceptions for emscripten (it's disabled by default)
-            // Later we should switch to wasm exceptions
+            // cc-rs unconditionally adds `-fno-exceptions` for wasm32.
+            // We need to re-enable exceptions and switch to the
+            // wasm-native EH ABI that Rust's emscripten target uses.
             config.flag_if_supported("-fexceptions");
+            config.flag_if_supported("-fwasm-exceptions");
         }
 
         // Common defines
         config.define("LUAI_MAXCSTACK", &*self.max_cstack_size.to_string());
         config.define("LUA_VECTOR_SIZE", &*self.vector_size.to_string());
+        config.define("LUA_API", "extern \"C\"");
 
         if self.use_longjmp {
             config.define("LUA_USE_LONGJMP", "1");
         }
 
-        if cfg!(not(debug_assertions)) {
-            config.define("NDEBUG", None);
-            config.opt_level(2);
+        if cfg!(debug_assertions) {
+            config.define("LUAU_ENABLE_ASSERT", None);
+        } else {
             // this flag allows compiler to lower sqrt() into a single CPU instruction
             config.flag_if_supported("-fno-math-errno");
         }
 
-        // Build Ast
+        config.include(&common_include_dir);
+
+        // Build `Ast` library
         let ast_lib_name = "luauast";
+        let ast_source_dir = luau_source_dir.join("Ast").join("src");
+        let ast_include_dir = luau_source_dir.join("Ast").join("include");
         config
             .clone()
             .include(&ast_include_dir)
-            .include(&common_include_dir)
-            .add_files_by_ext(&ast_source_dir, "cpp")
-            .out_dir(&lib_dir)
+            .add_files_by_ext_sorted(&ast_source_dir, "cpp")
+            .out_dir(&build_dir)
             .compile(ast_lib_name);
 
-        // Build CogeGen
+        // Build `CodeGen` library
         let codegen_lib_name = "luaucodegen";
+        let codegen_source_dir = luau_source_dir.join("CodeGen").join("src");
+        let codegen_include_dir = luau_source_dir.join("CodeGen").join("include");
         if self.enable_codegen {
             if target.ends_with("emscripten") {
                 panic!("codegen (jit) is not supported on emscripten");
@@ -157,67 +196,124 @@ impl Build {
             config
                 .clone()
                 .include(&codegen_include_dir)
-                .include(&common_include_dir)
                 .include(&vm_include_dir)
                 .include(&vm_source_dir)
                 .define("LUACODEGEN_API", "extern \"C\"")
-                // Code generator uses lua VM internals, so we need to provide the same defines used to build VM
-                .define("LUA_API", "extern \"C\"")
-                .add_files_by_ext(&codegen_source_dir, "cpp")
-                .out_dir(&lib_dir)
+                .add_files_by_ext_sorted(&codegen_source_dir, "cpp")
+                .out_dir(&build_dir)
                 .compile(codegen_lib_name);
         }
 
-        // Build Compiler
+        // Build `Common` library
+        let common_lib_name = "luaucommon";
+        let common_source_dir = luau_source_dir.join("Common").join("src");
+        config
+            .clone()
+            .add_files_by_ext_sorted(&common_source_dir, "cpp")
+            .out_dir(&build_dir)
+            .compile(common_lib_name);
+
+        // Build `Bytecode` library
+        let bytecode_lib_name = "luaubytecode";
+        let bytecode_source_dir = luau_source_dir.join("Bytecode").join("src");
+        let bytecode_include_dir = luau_source_dir.join("Bytecode").join("include");
+        config
+            .clone()
+            .include(&bytecode_include_dir)
+            .add_files_by_ext_sorted(&bytecode_source_dir, "cpp")
+            .out_dir(&build_dir)
+            .compile(bytecode_lib_name);
+
+        // Build `Inliner` library
+        let inliner_lib_name = "luauinliner";
+        let inliner_source_dir = luau_source_dir.join("Inliner").join("src");
+        let inliner_include_dir = luau_source_dir.join("Inliner").join("include");
+        config
+            .clone()
+            .include(&inliner_include_dir)
+            .include(&bytecode_include_dir)
+            .include(&bytecode_source_dir)
+            .include(&vm_include_dir)
+            .include(&vm_source_dir)
+            .define("LUAJITINLINER_API", "extern \"C\"")
+            .add_files_by_ext_sorted(&inliner_source_dir, "cpp")
+            .out_dir(&build_dir)
+            .compile(inliner_lib_name);
+
+        // Build `Compiler` library
         let compiler_lib_name = "luaucompiler";
+        let compiler_source_dir = luau_source_dir.join("Compiler").join("src");
+        let compiler_include_dir = luau_source_dir.join("Compiler").join("include");
         config
             .clone()
             .include(&compiler_include_dir)
+            .include(&bytecode_include_dir)
             .include(&ast_include_dir)
-            .include(&common_include_dir)
             .define("LUACODE_API", "extern \"C\"")
-            .add_files_by_ext(&compiler_source_dir, "cpp")
-            .out_dir(&lib_dir)
+            .add_files_by_ext_sorted(&compiler_source_dir, "cpp")
+            .out_dir(&build_dir)
             .compile(compiler_lib_name);
 
-        // Build customization lib
+        // Build `Config` library
+        let config_lib_name = "luauconfig";
+        let config_source_dir = luau_source_dir.join("Config").join("src");
+        let config_include_dir = luau_source_dir.join("Config").join("include");
+        config
+            .clone()
+            .include(&config_include_dir)
+            .include(&ast_include_dir)
+            .include(&compiler_include_dir)
+            .include(&vm_include_dir)
+            .add_files_by_ext_sorted(&config_source_dir, "cpp")
+            .out_dir(&build_dir)
+            .compile(config_lib_name);
+
+        // Build customization library
         let custom_lib_name = "luaucustom";
+        let custom_source_dir = luau_source_dir.join("Custom").join("src");
         config
             .clone()
             .include(&vm_include_dir)
             .include(&vm_source_dir)
-            .include(&common_include_dir)
-            .add_files_by_ext(&custom_source_dir, "cpp")
-            .out_dir(&lib_dir)
+            .add_files_by_ext_sorted(&custom_source_dir, "cpp")
+            .out_dir(&build_dir)
             .compile(custom_lib_name);
+
+        // Build `Require` library
+        let require_lib_name = "luaurequire";
+        let require_source_dir = luau_source_dir.join("Require").join("src");
+        let require_include_dir = luau_source_dir.join("Require").join("include");
+        config
+            .clone()
+            .include(&require_include_dir)
+            .include(&ast_include_dir)
+            .include(&config_include_dir)
+            .include(&vm_include_dir)
+            .add_files_by_ext_sorted(&require_source_dir, "cpp")
+            .out_dir(&build_dir)
+            .compile(require_lib_name);
 
         // Build VM
         let vm_lib_name = "luauvm";
         config
             .clone()
             .include(&vm_include_dir)
-            .include(&common_include_dir)
-            .define("LUA_API", "extern \"C\"")
-            .add_files_by_ext(&vm_source_dir, "cpp")
-            .out_dir(&lib_dir)
+            .add_files_by_ext_sorted(&vm_source_dir, "cpp")
+            .out_dir(&build_dir)
             .compile(vm_lib_name);
 
-        for f in &["lua.h", "luaconf.h", "lualib.h"] {
-            fs::copy(vm_include_dir.join(f), include_dir.join(f)).unwrap();
-        }
-        #[allow(clippy::single_element_loop)]
-        for f in &["luacode.h"] {
-            fs::copy(compiler_include_dir.join(f), include_dir.join(f)).unwrap();
-        }
-
         let mut artifacts = Artifacts {
-            lib_dir,
-            include_dir,
+            lib_dir: build_dir,
             libs: vec![
+                inliner_lib_name.to_string(),
                 vm_lib_name.to_string(),
+                bytecode_lib_name.to_string(),
                 compiler_lib_name.to_string(),
                 ast_lib_name.to_string(),
+                common_lib_name.to_string(),
+                config_lib_name.to_string(),
                 custom_lib_name.to_string(),
+                require_lib_name.to_string(),
             ],
             cpp_stdlib: Self::get_cpp_link_stdlib(target, host),
         };
@@ -263,10 +359,6 @@ impl Build {
 }
 
 impl Artifacts {
-    pub fn include_dir(&self) -> &Path {
-        &self.include_dir
-    }
-
     pub fn lib_dir(&self) -> &Path {
         &self.lib_dir
     }
@@ -278,13 +370,13 @@ impl Artifacts {
     pub fn print_cargo_metadata(&self) {
         println!("cargo:rustc-link-search=native={}", self.lib_dir.display());
         for lib in &self.libs {
-            println!("cargo:rustc-link-lib=static={}", lib);
+            println!("cargo:rustc-link-lib=static={lib}");
         }
         if let Some(ref cpp_stdlib) = self.cpp_stdlib {
-            println!("cargo:rustc-link-lib={}", cpp_stdlib);
+            println!("cargo:rustc-link-lib={cpp_stdlib}");
         }
         if let Some(version) = self.version() {
-            println!("cargo:rustc-env=LUAU_VERSION={}", version);
+            println!("cargo:rustc-env=LUAU_VERSION={version}");
         }
     }
 
@@ -296,18 +388,28 @@ impl Artifacts {
 }
 
 trait AddFilesByExt {
-    fn add_files_by_ext(&mut self, dir: &Path, ext: &str) -> &mut Self;
+    fn add_files_by_ext_sorted(&mut self, dir: &Path, ext: &str) -> &mut Self;
 }
 
 impl AddFilesByExt for cc::Build {
-    fn add_files_by_ext(&mut self, dir: &Path, ext: &str) -> &mut Self {
-        for entry in fs::read_dir(dir)
+    // It's important to keep the order of the files to get consistent builds between machines
+    // if the order is not always the same, the final binary produces a different SHA256 which
+    // might cause issues if one needs to verify which binary is being executed
+    fn add_files_by_ext_sorted(&mut self, dir: &Path, ext: &str) -> &mut Self {
+        let mut sources: Vec<_> = fs::read_dir(dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension() == Some(ext.as_ref()))
-        {
-            self.file(entry.path());
+            .map(|e| e.path())
+            .collect();
+
+        // Sort for determinism
+        sources.sort();
+
+        for source in sources {
+            self.file(source);
         }
+
         self
     }
 }

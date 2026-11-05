@@ -4,7 +4,7 @@
 
 #include "lstate.h"
 
-#define pcRel(pc, p) ((pc) ? cast_to(int, (pc) - (p)->code) - 1 : 0)
+#define pcRel(pc, p) ((pc) && (pc) != (p)->code ? cast_to(int, (pc) - (p)->code) - 1 : 0)
 
 #define luaG_typeerror(L, o, opname) luaG_typeerrorL(L, o, opname)
 #define luaG_forerror(L, o, what) luaG_forerrorL(L, o, what)
@@ -20,6 +20,7 @@ LUAI_FUNC l_noret luaG_aritherror(lua_State* L, const TValue* p1, const TValue* 
 LUAI_FUNC l_noret luaG_ordererror(lua_State* L, const TValue* p1, const TValue* p2, TMS op);
 LUAI_FUNC l_noret luaG_indexerror(lua_State* L, const TValue* p1, const TValue* p2);
 LUAI_FUNC l_noret luaG_methoderror(lua_State* L, const TValue* p1, const TString* p2);
+LUAI_FUNC l_noret luaG_missingmembererror(lua_State* L, const TValue* p1, const TValue* p2);
 LUAI_FUNC l_noret luaG_readonlyerror(lua_State* L);
 
 LUAI_FUNC LUA_PRINTF_ATTR(2, 3) l_noret luaG_runerrorL(lua_State* L, const char* fmt, ...);
@@ -31,3 +32,4 @@ LUAI_FUNC bool luaG_onbreak(lua_State* L);
 LUAI_FUNC int luaG_getline(Proto* p, int pc);
 
 LUAI_FUNC int luaG_isnative(lua_State* L, int level);
+LUAI_FUNC int luaG_hasnative(lua_State* L, int level);

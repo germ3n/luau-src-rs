@@ -33,22 +33,22 @@ namespace X64
 
 struct IrRegAllocX64;
 
-constexpr uint32_t kFunctionAlignment = 32;
+inline constexpr uint32_t kFunctionAlignment = 32;
 
 // Data that is very common to access is placed in non-volatile registers
-constexpr RegisterX64 rState = r15;         // lua_State* L
-constexpr RegisterX64 rBase = r14;          // StkId base
-constexpr RegisterX64 rNativeContext = r13; // NativeContext* context
-constexpr RegisterX64 rConstants = r12;     // TValue* k
+inline constexpr RegisterX64 rState = r15;         // lua_State* L
+inline constexpr RegisterX64 rBase = r14;          // StkId base
+inline constexpr RegisterX64 rNativeContext = r13; // NativeContext* context
+inline constexpr RegisterX64 rConstants = r12;     // TValue* k
 
-constexpr unsigned kExtraLocals = 3; // Number of 8 byte slots available for specialized local variables specified below
-constexpr unsigned kSpillSlots = 13; // Number of 8 byte slots available for register allocator to spill data into
+inline constexpr unsigned kExtraLocals = 3; // Number of 8 byte slots available for specialized local variables specified below
+inline constexpr unsigned kSpillSlots = 23; // Number of 8 byte slots available for register allocator to spill data into
 static_assert((kExtraLocals + kSpillSlots) * 8 % 16 == 0, "locals have to preserve 16 byte alignment");
 
-constexpr uint8_t kWindowsFirstNonVolXmmReg = 6;
+inline constexpr uint8_t kWindowsFirstNonVolXmmReg = 6;
 
-constexpr uint8_t kWindowsUsableXmmRegs = 10; // Some xmm regs are non-volatile, we have to balance how many we want to use/preserve
-constexpr uint8_t kSystemVUsableXmmRegs = 16; // All xmm regs are volatile
+inline constexpr uint8_t kWindowsUsableXmmRegs = 10; // Some xmm regs are non-volatile, we have to balance how many we want to use/preserve
+inline constexpr uint8_t kSystemVUsableXmmRegs = 16; // All xmm regs are volatile
 
 inline uint8_t getXmmRegisterCount(ABIX64 abi)
 {
@@ -57,11 +57,11 @@ inline uint8_t getXmmRegisterCount(ABIX64 abi)
 
 // Native code is as stackless as the interpreter, so we can place some data on the stack once and have it accessible at any point
 // Stack is separated into sections for different data. See CodeGenX64.cpp for layout overview
-constexpr unsigned kStackAlign = 8; // Bytes we need to align the stack for non-vol xmm register storage
-constexpr unsigned kStackLocalStorage = 8 * kExtraLocals;
-constexpr unsigned kStackSpillStorage = 8 * kSpillSlots;
-constexpr unsigned kStackExtraArgumentStorage = 2 * 8; // Bytes for 5th and 6th function call arguments used under Windows ABI
-constexpr unsigned kStackRegHomeStorage = 4 * 8;       // Register 'home' locations that can be used by callees under Windows ABI
+inline constexpr unsigned kStackAlign = 8; // Bytes we need to align the stack for non-vol xmm register storage
+inline constexpr unsigned kStackLocalStorage = 8 * kExtraLocals;
+inline constexpr unsigned kStackSpillStorage = 8 * kSpillSlots;
+inline constexpr unsigned kStackExtraArgumentStorage = 2 * 8; // Bytes for 5th and 6th function call arguments used under Windows ABI
+inline constexpr unsigned kStackRegHomeStorage = 4 * 8;       // Register 'home' locations that can be used by callees under Windows ABI
 
 inline unsigned getNonVolXmmStorageSize(ABIX64 abi, uint8_t xmmRegCount)
 {
@@ -77,19 +77,19 @@ inline unsigned getNonVolXmmStorageSize(ABIX64 abi, uint8_t xmmRegCount)
 }
 
 // Useful offsets to specific parts
-constexpr unsigned kStackOffsetToLocals = kStackExtraArgumentStorage + kStackRegHomeStorage;
-constexpr unsigned kStackOffsetToSpillSlots = kStackOffsetToLocals + kStackLocalStorage;
+inline constexpr unsigned kStackOffsetToLocals = kStackExtraArgumentStorage + kStackRegHomeStorage;
+inline constexpr unsigned kStackOffsetToSpillSlots = kStackOffsetToLocals + kStackLocalStorage;
 
 inline unsigned getFullStackSize(ABIX64 abi, uint8_t xmmRegCount)
 {
     return kStackOffsetToSpillSlots + kStackSpillStorage + getNonVolXmmStorageSize(abi, xmmRegCount) + kStackAlign;
 }
 
-constexpr OperandX64 sClosure = qword[rsp + kStackOffsetToLocals + 0]; // Closure* cl
-constexpr OperandX64 sCode = qword[rsp + kStackOffsetToLocals + 8];    // Instruction* code
-constexpr OperandX64 sTemporarySlot = addr[rsp + kStackOffsetToLocals + 16];
+inline constexpr OperandX64 sClosure = qword[rsp + kStackOffsetToLocals + 0]; // Closure* cl
+inline constexpr OperandX64 sCode = qword[rsp + kStackOffsetToLocals + 8];    // Instruction* code
+inline constexpr OperandX64 sTemporarySlot = addr[rsp + kStackOffsetToLocals + 16];
 
-constexpr OperandX64 sSpillArea = addr[rsp + kStackOffsetToSpillSlots];
+inline constexpr OperandX64 sSpillArea = addr[rsp + kStackOffsetToSpillSlots];
 
 inline OperandX64 luauReg(int ri)
 {
@@ -119,6 +119,11 @@ inline OperandX64 luauRegExtra(int ri)
 inline OperandX64 luauRegValueInt(int ri)
 {
     return dword[rBase + ri * sizeof(TValue) + offsetof(TValue, value)];
+}
+
+inline OperandX64 luauRegValueInt64(int ri)
+{
+    return qword[rBase + ri * sizeof(TValue) + offsetof(TValue, value.l)];
 }
 
 inline OperandX64 luauRegValueVector(int ri, int index)
@@ -197,7 +202,7 @@ inline void jumpIfTruthy(AssemblyBuilderX64& build, int ri, Label& target, Label
     build.jcc(ConditionX64::NotEqual, target); // true if boolean value is 'true'
 }
 
-void jumpOnNumberCmp(AssemblyBuilderX64& build, RegisterX64 tmp, OperandX64 lhs, OperandX64 rhs, IrCondition cond, Label& label);
+void jumpOnNumberCmp(AssemblyBuilderX64& build, RegisterX64 tmp, OperandX64 lhs, OperandX64 rhs, IrCondition cond, Label& label, bool floatPrecision);
 
 ConditionX64 getConditionInt(IrCondition cond);
 
@@ -208,8 +213,10 @@ void callArithHelper(IrRegAllocX64& regs, AssemblyBuilderX64& build, int ra, Ope
 void callLengthHelper(IrRegAllocX64& regs, AssemblyBuilderX64& build, int ra, int rb);
 void callGetTable(IrRegAllocX64& regs, AssemblyBuilderX64& build, int rb, OperandX64 c, int ra);
 void callSetTable(IrRegAllocX64& regs, AssemblyBuilderX64& build, int rb, OperandX64 c, int ra);
-void checkObjectBarrierConditions(AssemblyBuilderX64& build, RegisterX64 tmp, RegisterX64 object, IrOp ra, int ratag, Label& skip);
-void callBarrierObject(IrRegAllocX64& regs, AssemblyBuilderX64& build, RegisterX64 object, IrOp objectOp, IrOp ra, int ratag);
+void checkObjectBarrierConditions(AssemblyBuilderX64& build, RegisterX64 tmp, RegisterX64 object, RegisterX64 ra, IrOp raOp, int ratag, Label& skip);
+void checkObjectBarrierConditions_DEPRECATED(AssemblyBuilderX64& build, RegisterX64 tmp, RegisterX64 object, IrOp ra, int ratag, Label& skip);
+void callBarrierObject(IrRegAllocX64& regs, AssemblyBuilderX64& build, RegisterX64 object, IrOp objectOp, RegisterX64 ra, IrOp raOp, int ratag);
+void callBarrierObject_DEPRECATED(IrRegAllocX64& regs, AssemblyBuilderX64& build, RegisterX64 object, IrOp objectOp, IrOp ra, int ratag);
 void callBarrierTableFast(IrRegAllocX64& regs, AssemblyBuilderX64& build, RegisterX64 table, IrOp tableOp);
 void callStepGc(IrRegAllocX64& regs, AssemblyBuilderX64& build);
 
@@ -222,6 +229,7 @@ void emitFallback(IrRegAllocX64& regs, AssemblyBuilderX64& build, int offset, in
 void emitUpdatePcForExit(AssemblyBuilderX64& build);
 
 void emitReturn(AssemblyBuilderX64& build, ModuleHelpers& helpers);
+void emitDispatchLuauCall(AssemblyBuilderX64& build, ModuleHelpers& helpers);
 
 } // namespace X64
 } // namespace CodeGen

@@ -5,28 +5,68 @@
 #include "CodeGenLower.h"
 #include "CodeGenX64.h"
 
+#include "Luau/CodeGenCommon.h"
 #include "Luau/CodeBlockUnwind.h"
 #include "Luau/UnwindBuilder.h"
 #include "Luau/UnwindBuilderDwarf2.h"
 #include "Luau/UnwindBuilderWin.h"
 
 #include "lapi.h"
+#include "ldo.h"
+#include "lfunc.h"
+#include "lgc.h"
+#include "lmem.h"
+
+#include <algorithm>
+
+#include <stdio.h>
 
 LUAU_FASTINTVARIABLE(LuauCodeGenBlockSize, 4 * 1024 * 1024)
 LUAU_FASTINTVARIABLE(LuauCodeGenMaxTotalSize, 256 * 1024 * 1024)
+LUAU_FASTFLAG(LuauRuntimeFeedback)
 
 namespace Luau
 {
 namespace CodeGen
 {
 
+// PCG32 PRNG helpers for JIT layout randomization.
+// Uses the same algorithm and constants as the Lua VM (lmathlib.cpp) for consistency.
+uint64_t jitRngSeed(uintptr_t ptr)
+{
+    uint64_t state = 0;
+    state = state * 6364136223846793005ULL + (105 | 1);
+    state += uint64_t(ptr);
+    state = state * 6364136223846793005ULL + (105 | 1);
+    return state;
+}
+
+uint32_t jitRngRandom(uint64_t& state)
+{
+    uint64_t oldstate = state;
+    state = oldstate * 6364136223846793005ULL + (105 | 1);
+    uint32_t xorshifted = uint32_t(((oldstate >> 18u) ^ oldstate) >> 27u);
+    uint32_t rot = uint32_t(oldstate >> 59u);
+    return (xorshifted >> rot) | (xorshifted << ((-int32_t(rot)) & 31));
+}
+
+
 static const Instruction kCodeEntryInsn = LOP_NATIVECALL;
+
+// TODO: could be promoted to flags or compilation option fields
+
+// Maximum number of times a single function can be rebuilt
+constexpr uint32_t kMaxFunctionRebuilds = 5;
+
+// Number of VM hits after which we will natively compile if promoteVmFunctions is enabled
+constexpr uint32_t kNativeCompilationHitThreshold = 100'000;
 
 // From CodeGen.cpp
 static void* gPerfLogContext = nullptr;
 static PerfLogFn gPerfLogFn = nullptr;
 
 unsigned int getCpuFeaturesA64();
+unsigned int getCpuFeaturesX64();
 
 void setPerfLog(void* context, PerfLogFn logFn)
 {
@@ -79,6 +119,9 @@ static void logPerfFunctions(
         CODEGEN_ASSERT(protoIt != moduleProtos.end());
 
         logPerfFunction(*protoIt, uintptr_t(header.entryOffsetOrAddress), uint32_t(header.nativeCodeSize));
+
+        if (FFlag::LuauRuntimeFeedback)
+            ++protoIt;
     }
 }
 
@@ -121,6 +164,9 @@ template<bool Release, typename NativeProtosVector>
         proto->codeentry = &kCodeEntryInsn;
 
         ++protosBound;
+
+        if (FFlag::LuauRuntimeFeedback)
+            ++protoIt;
     }
 
     return protosBound;
@@ -142,6 +188,11 @@ BaseCodeGenContext::BaseCodeGenContext(size_t blockSize, size_t maxTotalSize, Al
     codeAllocator.destroyBlockUnwindInfo = destroyBlockUnwindInfo;
 
     initFunctions(context);
+}
+
+BaseCodeGenContext::~BaseCodeGenContext()
+{
+    codeAllocator.deallocate(gateAllocationData);
 }
 
 [[nodiscard]] bool BaseCodeGenContext::initHeaderFunctions()
@@ -168,6 +219,7 @@ StandaloneCodeGenContext::StandaloneCodeGenContext(
     void* allocationCallbackContext
 )
     : BaseCodeGenContext{blockSize, maxTotalSize, allocationCallback, allocationCallbackContext}
+    , sharedAllocator{&codeAllocator}
 {
 }
 
@@ -187,30 +239,27 @@ StandaloneCodeGenContext::StandaloneCodeGenContext(
     size_t codeSize
 )
 {
-    uint8_t* nativeData = nullptr;
-    size_t sizeNativeData = 0;
-    uint8_t* codeStart = nullptr;
-    if (!codeAllocator.allocate(data, int(dataSize), code, int(codeSize), nativeData, sizeNativeData, codeStart))
-    {
+    NativeModuleRef moduleRef = sharedAllocator.insertAnonymousNativeModule(std::move(nativeProtos), data, dataSize, code, codeSize);
+
+    // If we did not get a NativeModule back, allocation failed:
+    if (moduleRef.empty())
         return {CodeGenCompilationResult::AllocationFailed};
-    }
 
-    // Relocate the entry offsets to their final executable addresses:
-    for (const NativeProtoExecDataPtr& nativeProto : nativeProtos)
-    {
-        NativeProtoExecDataHeader& header = getNativeProtoExecDataHeader(nativeProto.get());
+    logPerfFunctions(moduleProtos, moduleRef->getModuleBaseAddress(), moduleRef->getNativeProtos());
 
-        header.entryOffsetOrAddress = codeStart + reinterpret_cast<uintptr_t>(header.entryOffsetOrAddress);
-    }
-
-    logPerfFunctions(moduleProtos, codeStart, nativeProtos);
-
-    const uint32_t protosBound = bindNativeProtos<true>(moduleProtos, nativeProtos);
+    // Bind the native protos and acquire an owning reference for each:
+    const uint32_t protosBound = bindNativeProtos<false>(moduleProtos, moduleRef->getNativeProtos());
+    moduleRef->addRefs(protosBound);
 
     return {CodeGenCompilationResult::Success, protosBound};
 }
 
-void StandaloneCodeGenContext::onCloseState() noexcept
+VmCodeGenData& StandaloneCodeGenContext::getVmData(lua_State* L)
+{
+    return vmData;
+}
+
+void StandaloneCodeGenContext::onCloseState(lua_State* L) noexcept
 {
     // The StandaloneCodeGenContext is owned by the one VM that owns it, so when
     // that VM is destroyed, we destroy *this as well:
@@ -219,7 +268,7 @@ void StandaloneCodeGenContext::onCloseState() noexcept
 
 void StandaloneCodeGenContext::onDestroyFunction(void* execdata) noexcept
 {
-    destroyNativeProtoExecData(static_cast<uint32_t*>(execdata));
+    getNativeProtoExecDataHeader(static_cast<const uint32_t*>(execdata)).nativeModule->release();
 }
 
 
@@ -289,18 +338,37 @@ SharedCodeGenContext::SharedCodeGenContext(
     return {CodeGenCompilationResult::Success, protosBound};
 }
 
-void SharedCodeGenContext::onCloseState() noexcept
+VmCodeGenData& SharedCodeGenContext::getVmData(lua_State* L)
 {
-    // The lifetime of the SharedCodeGenContext is managed separately from the
-    // VMs that use it.  When a VM is destroyed, we don't need to do anything
-    // here.
+    CODEGEN_ASSERT(L == L->global->mainthread);
+
+    std::unique_lock lock{vmDataMutex};
+    std::unique_ptr<VmCodeGenData>& data = vmData[L];
+
+    if (!data)
+        data = std::make_unique<VmCodeGenData>();
+
+    return *data;
+}
+
+void SharedCodeGenContext::onCloseState(lua_State* L) noexcept
+{
+    CODEGEN_ASSERT(L == L->global->mainthread);
+
+    if (FFlag::LuauRuntimeFeedback)
+    {
+        // The lifetime of the SharedCodeGenContext is managed separately from the VMs that use it
+        // When a VM is destroyed, only its runtime build data is removed
+        std::unique_lock lock{vmDataMutex};
+
+        vmData.erase(L);
+    }
 }
 
 void SharedCodeGenContext::onDestroyFunction(void* execdata) noexcept
 {
     getNativeProtoExecDataHeader(static_cast<const uint32_t*>(execdata)).nativeModule->release();
 }
-
 
 [[nodiscard]] UniqueSharedCodeGenContext createSharedCodeGenContext()
 {
@@ -347,13 +415,29 @@ void SharedCodeGenContextDeleter::operator()(const SharedCodeGenContext* codeGen
 
 static void onCloseState(lua_State* L)
 {
-    getCodeGenContext(L)->onCloseState();
+    CODEGEN_ASSERT(L == L->global->mainthread);
+    getCodeGenContext(L)->onCloseState(L);
     L->global->ecb = lua_ExecutionCallbacks{};
 }
 
 static void onDestroyFunction(lua_State* L, Proto* proto)
 {
-    getCodeGenContext(L)->onDestroyFunction(proto->execdata);
+    if (FFlag::LuauRuntimeFeedback)
+    {
+        BaseCodeGenContext* codeGenContext = getCodeGenContext(L);
+        VmCodeGenData& vmData = codeGenContext->getVmData(L->global->mainthread);
+
+        // If latest function is destroyed, clear its build history
+        if (proto->funid != 0 && proto->optimized == nullptr)
+            vmData.buildHistory.erase(proto->funid);
+
+        codeGenContext->onDestroyFunction(proto->execdata);
+    }
+    else
+    {
+        getCodeGenContext(L)->onDestroyFunction(proto->execdata);
+    }
+
     proto->execdata = nullptr;
     proto->exectarget = 0;
     proto->codeentry = proto->code;
@@ -374,6 +458,9 @@ static int onEnter(lua_State* L, Proto* proto)
 
 static int onEnterDisabled(lua_State* L, Proto* proto)
 {
+    // If the function wasn't entered natively, it cannot be resumed natively later
+    L->ci->flags &= ~LUA_CALLINFO_NATIVE;
+
     return 1;
 }
 
@@ -392,6 +479,170 @@ static size_t getMemorySize(lua_State* L, Proto* proto)
     return execDataSize + execDataHeader.nativeCodeSize;
 }
 
+static char* getCounterData(lua_State* L, Proto* proto, size_t* count)
+{
+    CODEGEN_ASSERT(count != nullptr);
+
+    const NativeProtoExecDataHeader& execDataHeader = getNativeProtoExecDataHeader(static_cast<const uint32_t*>(proto->execdata));
+
+    *count = execDataHeader.extraDataCount / 4;
+    return reinterpret_cast<char*>(static_cast<uint32_t*>(proto->execdata) + proto->sizecode);
+}
+
+static void examineFunction(lua_State* L, Proto* proto)
+{
+    // Fast exit if target function never executed
+    if (proto->execcount == 0)
+        return;
+
+    if ((proto->execflags & PEF_DEBUGLOCKED) != 0 || proto->optimized != nullptr || proto->funid == 0)
+    {
+        proto->execflags |= PEF_EXECLOCKED;
+        return;
+    }
+
+    BaseCodeGenContext* codeGenContext = getCodeGenContext(L);
+    VmCodeGenData& vmData = codeGenContext->getVmData(L->global->mainthread);
+
+    if (!vmData.runtimeRebuildEnabled)
+    {
+        proto->execflags |= PEF_EXECLOCKED;
+        return;
+    }
+
+    // If function is not native, we check if VM promotion is enabled and we reached the threshold
+    if (proto->execdata == nullptr)
+    {
+        if (vmData.promoteVmFunctions)
+        {
+            if (proto->execcount >= kNativeCompilationHitThreshold)
+                vmData.protosToRebuild.insert(proto);
+        }
+        else
+        {
+            proto->execflags |= PEF_EXECLOCKED;
+        }
+
+        return;
+    }
+
+    // Rebuild based on feedback counters will be detected here
+}
+
+[[nodiscard]] static CompilationResult compileProtos(
+    const std::optional<ModuleId>& moduleId,
+    lua_State* L,
+    BaseCodeGenContext* codeGenContext,
+    const std::vector<Proto*>& protos,
+    const CompilationOptions& options,
+    CompilationStats* stats
+);
+
+static void commitFunctions(lua_State* L)
+{
+    BaseCodeGenContext* codeGenContext = getCodeGenContext(L);
+
+    VmCodeGenData& vmData = codeGenContext->getVmData(L->global->mainthread);
+
+    // Interpreted functions are compiled in place, native functions are rebuilt into a copy
+    struct PendingBuild
+    {
+        Proto* proto = nullptr;
+        Proto* copy = nullptr;
+        uint32_t execCount = 0;
+    };
+
+    std::vector<PendingBuild> builds;
+    std::vector<Proto*> buildProtos;
+
+    for (Proto* proto : vmData.protosToRebuild)
+    {
+        CODEGEN_ASSERT(proto->funid != 0);
+
+        // Rechecking failure conditions since the time function was examined
+        if ((proto->execflags & PEF_DEBUGLOCKED) != 0 || proto->optimized != nullptr)
+        {
+            proto->execflags |= PEF_EXECLOCKED;
+            continue;
+        }
+
+        // Promote VM function to native
+        if (proto->execdata == nullptr)
+        {
+            builds.push_back({proto, nullptr, proto->execcount});
+            buildProtos.push_back(proto);
+            proto->execcount = 0;
+            continue;
+        }
+
+        // Function rebuild based on feedback counters will be here
+    }
+
+    vmData.protosToRebuild.clear();
+
+    if (builds.empty())
+        return;
+
+    CompilationResult result = compileProtos({}, L, codeGenContext, buildProtos, vmData.options, nullptr);
+
+    // TODO: callback function for host telemetry recording
+    if (result.result != CodeGenCompilationResult::Success)
+        return;
+
+    for (size_t i = 0; i < builds.size(); i++)
+    {
+        Proto* proto = builds[i].proto;
+        Proto* copy = builds[i].copy;
+
+        // Initial VM to native promotion is performed inplace, so we don't need to swith Proto to the optimized version
+        if (copy == nullptr)
+            continue;
+
+        // This function failed to compile natively
+        if (copy->execdata == nullptr)
+            continue;
+
+        FunctionBuildHistory& history = vmData.buildHistory[proto->funid];
+
+        copy->deoptimized = proto;
+        proto->optimized = copy;
+        luaC_objbarrier(L, proto, copy);
+
+        history.rebuildCount++;
+
+        if (history.rebuildCount >= kMaxFunctionRebuilds)
+        {
+            copy->execflags |= PEF_EXECLOCKED;
+            vmData.buildHistory.erase(proto->funid);
+        }
+    }
+}
+
+static void examineFunctionSafe(lua_State* L, Proto* proto) noexcept
+{
+    try
+    {
+        examineFunction(L, proto);
+    }
+    catch (const std::exception&)
+    {
+        // Function will be examined again later
+    }
+}
+
+static void commitFunctionsSafe(lua_State* L) noexcept
+{
+    try
+    {
+        commitFunctions(L);
+    }
+    catch (const std::exception&)
+    {
+        // Pending functions are dropped, they will be examined again when they reach the thresholds
+        getCodeGenContext(L)->getVmData(L->global->mainthread).protosToRebuild.clear();
+    }
+}
+
 static void initializeExecutionCallbacks(lua_State* L, BaseCodeGenContext* codeGenContext) noexcept
 {
     CODEGEN_ASSERT(codeGenContext != nullptr);
@@ -404,6 +655,13 @@ static void initializeExecutionCallbacks(lua_State* L, BaseCodeGenContext* codeG
     ecb->enter = onEnter;
     ecb->disable = onDisable;
     ecb->getmemorysize = getMemorySize;
+    ecb->getcounterdata = getCounterData;
+
+    if (FFlag::LuauRuntimeFeedback)
+    {
+        ecb->examinefunction = examineFunctionSafe;
+        ecb->commitfunctions = commitFunctionsSafe;
+    }
 }
 
 void create(lua_State* L)
@@ -424,26 +682,50 @@ void create(lua_State* L, size_t blockSize, size_t maxTotalSize, AllocationCallb
     if (!codeGenContext->initHeaderFunctions())
         return;
 
+    if (FFlag::LuauRuntimeFeedback)
+    {
+        // Reserve VM data
+        codeGenContext->getVmData(L->global->mainthread);
+    }
+
     initializeExecutionCallbacks(L, codeGenContext.release());
 }
 
 void create(lua_State* L, SharedCodeGenContext* codeGenContext)
 {
+    if (FFlag::LuauRuntimeFeedback)
+    {
+        // Reserve VM data
+        codeGenContext->getVmData(L->global->mainthread);
+    }
+
     initializeExecutionCallbacks(L, codeGenContext);
 }
 
 [[nodiscard]] static NativeProtoExecDataPtr createNativeProtoExecData(Proto* proto, const IrBuilder& ir)
 {
-    NativeProtoExecDataPtr nativeExecData = createNativeProtoExecData(proto->sizecode);
+    uint32_t extraDataCount = uint32_t(ir.function.extraNativeData.size());
+
+    NativeProtoExecDataPtr nativeExecData = createNativeProtoExecData(proto->sizecode, extraDataCount);
 
     uint32_t instTarget = ir.function.entryLocation;
+    uint32_t unassignedOffset = ir.function.endLocation - instTarget;
 
     for (int i = 0; i < proto->sizecode; ++i)
     {
-        CODEGEN_ASSERT(ir.function.bcMapping[i].asmLocation >= instTarget);
+        const BytecodeMapping& bcMapping = ir.function.bcMapping[i];
 
-        nativeExecData[i] = ir.function.bcMapping[i].asmLocation - instTarget;
+        CODEGEN_ASSERT(bcMapping.asmLocation >= instTarget);
+
+        if (bcMapping.asmLocation != ~0u)
+            nativeExecData[i] = bcMapping.asmLocation - instTarget;
+        else
+            nativeExecData[i] = unassignedOffset;
     }
+
+    // After the instruction offsets, custom native data is placed
+    for (uint32_t i = 0; i < extraDataCount; i++)
+        nativeExecData[proto->sizecode + i] = ir.function.extraNativeData[i];
 
     // Set first instruction offset to 0 so that entering this function still
     // executes any generated entry code.
@@ -453,21 +735,30 @@ void create(lua_State* L, SharedCodeGenContext* codeGenContext)
     header.entryOffsetOrAddress = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(instTarget));
     header.bytecodeId = uint32_t(proto->bytecodeid);
     header.bytecodeInstructionCount = proto->sizecode;
+    header.extraDataCount = extraDataCount;
 
     return nativeExecData;
 }
 
 template<typename AssemblyBuilder>
 [[nodiscard]] static NativeProtoExecDataPtr createNativeFunction(
+    LogBuilder* logger,
     AssemblyBuilder& build,
     ModuleHelpers& helpers,
     Proto* proto,
     uint32_t& totalIrInstCount,
-    const HostIrHooks& hooks,
-    CodeGenCompilationResult& result
+    const CompilationOptions& options,
+    CodeGenCompilationResult& result,
+    const VmEnvironmentInfo& envInfo
 )
 {
-    IrBuilder ir(hooks);
+    IrBuilder ir(options.hooks, envInfo);
+
+    if (FFlag::LuauRuntimeFeedback)
+    {
+        ir.function.recordFeedback = options.runtimeFeedback;
+    }
+
     ir.buildFunctionIr(proto);
 
     unsigned instCount = unsigned(ir.function.instructions.size());
@@ -480,7 +771,10 @@ template<typename AssemblyBuilder>
 
     totalIrInstCount += instCount;
 
-    if (!lowerFunction(ir, build, helpers, proto, {}, /* stats */ nullptr, result))
+    AssemblyOptions assemblyOptions;
+    assemblyOptions.compilationOptions = options;
+
+    if (!lowerFunction(ir, logger, build, helpers, proto, assemblyOptions, /* stats */ nullptr, result))
     {
         return {};
     }
@@ -541,24 +835,45 @@ template<typename AssemblyBuilder>
         }
     }
 
+    return compileProtos(moduleId, L, codeGenContext, protos, options, stats);
+}
+
+[[nodiscard]] static CompilationResult compileProtos(
+    const std::optional<ModuleId>& moduleId,
+    lua_State* L,
+    BaseCodeGenContext* codeGenContext,
+    const std::vector<Proto*>& protos,
+    const CompilationOptions& options,
+    CompilationStats* stats
+)
+{
 #if defined(CODEGEN_TARGET_A64)
     static unsigned int cpuFeatures = getCpuFeaturesA64();
-    A64::AssemblyBuilderA64 build(/* logText= */ false, cpuFeatures);
+    A64::AssemblyBuilderA64 build(/* logger= */ nullptr, cpuFeatures);
 #else
-    X64::AssemblyBuilderX64 build(/* logText= */ false);
+    static unsigned int cpuFeatures = getCpuFeaturesX64();
+    X64::AssemblyBuilderX64 build(/* logger= */ nullptr, cpuFeatures);
 #endif
 
     ModuleHelpers helpers;
 #if defined(CODEGEN_TARGET_A64)
-    A64::assembleHelpers(build, helpers);
+    A64::assembleHelpers(/* logger= */ nullptr, build, helpers);
 #else
-    X64::assembleHelpers(build, helpers);
+    X64::assembleHelpers(/* logger= */ nullptr, build, helpers);
 #endif
+
+    VmEnvironmentInfo envInfo;
+    envInfo.hasPcall = L->global->builtinPcall != nullptr;
+    envInfo.hasXpcall = L->global->builtinXpcall != nullptr;
 
     CompilationResult compilationResult;
 
     std::vector<NativeProtoExecDataPtr> nativeProtos;
     nativeProtos.reserve(protos.size());
+
+    std::vector<Proto*> compiledProtos;
+    if (FFlag::LuauRuntimeFeedback)
+        compiledProtos.reserve(protos.size());
 
     uint32_t totalIrInstCount = 0;
 
@@ -566,14 +881,18 @@ template<typename AssemblyBuilder>
     {
         CodeGenCompilationResult protoResult = CodeGenCompilationResult::Success;
 
-        NativeProtoExecDataPtr nativeExecData = createNativeFunction(build, helpers, protos[i], totalIrInstCount, options.hooks, protoResult);
+        NativeProtoExecDataPtr nativeExecData =
+            createNativeFunction(nullptr, build, helpers, protos[i], totalIrInstCount, options, protoResult, envInfo);
         if (nativeExecData != nullptr)
         {
             nativeProtos.push_back(std::move(nativeExecData));
+            if (FFlag::LuauRuntimeFeedback)
+                compiledProtos.push_back(protos[i]);
         }
         else
         {
-            compilationResult.protoFailures.push_back({protoResult, protos[i]->debugname ? getstr(protos[i]->debugname) : "", protos[i]->linedefined}
+            compilationResult.protoFailures.push_back(
+                {protoResult, protos[i]->debugname ? getstr(protos[i]->debugname) : "", protos[i]->linedefined}
             );
         }
     }
@@ -622,7 +941,7 @@ template<typename AssemblyBuilder>
 
     const ModuleBindResult bindResult = codeGenContext->bindModule(
         moduleId,
-        protos,
+        !FFlag::LuauRuntimeFeedback || moduleId ? protos : compiledProtos,
         std::move(nativeProtos),
         reinterpret_cast<const uint8_t*>(build.data.data()),
         build.data.size(),
@@ -691,6 +1010,17 @@ void setUserdataRemapper(lua_State* L, void* context, UserdataRemapperCallback c
         codegenCtx->userdataRemapper = cb;
 
         L->global->ecb.gettypemapping = cb ? userdataRemapperWrap : nullptr;
+    }
+}
+
+void enableRuntimeCompilation(lua_State* L, const CompilationOptions& options, bool promoteVmFunctions)
+{
+    if (BaseCodeGenContext* codeGenContext = getCodeGenContext(L))
+    {
+        VmCodeGenData& vmData = codeGenContext->getVmData(L->global->mainthread);
+        vmData.options = options;
+        vmData.runtimeRebuildEnabled = true;
+        vmData.promoteVmFunctions = promoteVmFunctions;
     }
 }
 

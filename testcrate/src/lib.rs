@@ -1,20 +1,30 @@
+#![allow(unsafe_op_in_unsafe_fn, non_snake_case, clippy::missing_safety_doc)]
+
 use std::os::raw::{c_char, c_int, c_long, c_void};
 
 #[repr(C)]
-#[allow(non_snake_case, non_camel_case_types)]
 pub struct lua_CompileOptions {
     optimizationLevel: c_int,
     debugLevel: c_int,
+    typeInfoLevel: c_int,
     coverageLevel: c_int,
     vectorLib: *const c_char,
     vectorCtor: *const c_char,
+    vectorType: *const c_char,
     mutableGlobals: *const *const c_char,
+    userdataTypes: *const *const c_char,
+    librariesWithKnownMembers: *const *const c_char,
+    libraryMemberTypeCb: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> c_int>,
+    libraryMemberConstantCb:
+        Option<unsafe extern "C" fn(*const c_char, *const c_char, *mut *mut c_void)>,
+    disabledBuiltins: *const *const c_char,
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn free(ptr: *mut c_void);
 
     pub fn luaL_newstate() -> *mut c_void;
+    pub fn luau_setfuel(state: *mut c_void, fuel: u64);
     pub fn lua_close(state: *mut c_void);
     pub fn luaL_openlibs(state: *mut c_void);
     pub fn lua_getfield(state: *mut c_void, index: c_int, k: *const c_char) -> c_int;
@@ -55,110 +65,112 @@ extern "C" {
 }
 
 #[cfg(not(target_os = "emscripten"))]
-extern "C" {
+unsafe extern "C" {
     pub fn luau_codegen_supported() -> c_int;
     pub fn luau_codegen_create(state: *mut c_void);
     pub fn luau_codegen_compile(state: *mut c_void, idx: c_int);
 }
 
 pub unsafe fn lua_getglobal(state: *mut c_void, k: *const c_char) {
-    lua_getfield(state, -102002 /* LUA_GLOBALSINDEX */, k);
+    lua_getfield(state, -1002002 /* LUA_GLOBALSINDEX */, k);
 }
 
-#[test]
-fn test_luau() {
-    use std::{ptr, slice, str};
-    unsafe {
-        let state = luaL_newstate();
-        assert!(state != ptr::null_mut());
-
-        // Enable JIT if supported
-        #[cfg(not(target_os = "emscripten"))]
-        if luau_codegen_supported() != 0 {
-            luau_codegen_create(state);
-        }
-
-        luaL_openlibs(state);
-
-        let version = {
-            lua_getglobal(state, "_VERSION\0".as_ptr().cast());
-            let mut len: c_long = 0;
-            let version_ptr = lua_tolstring(state, -1, &mut len);
-            let s = slice::from_raw_parts(version_ptr as *const u8, len as usize);
-            str::from_utf8(s).unwrap()
-        };
-
-        assert_eq!(version, "Luau");
-
-        let code = "local a, b = ... return a + b\0";
-        let mut bytecode_size = 0;
-        let bytecode = luau_compile(
-            code.as_ptr().cast(),
-            code.len() - 1,
-            ptr::null_mut(),
-            &mut bytecode_size,
-        );
-        let result = luau_load(state, "sum\0".as_ptr().cast(), bytecode, bytecode_size, 0);
-        assert_eq!(result, 0);
-        free(bytecode.cast());
-
-        // Compile the function (JIT, if supported)
-        #[cfg(not(target_os = "emscripten"))]
-        if luau_codegen_supported() != 0 {
-            luau_codegen_compile(state, -1);
-        }
-
-        // Call the loaded function
-        lua_pushinteger(state, 123);
-        lua_pushinteger(state, 321);
-        lua_call(state, 2, 1);
-        assert_eq!(lua_tointegerx(state, -1, ptr::null_mut()), 444);
-
-        lua_close(state);
-    }
+pub unsafe fn to_string<'a>(state: *mut c_void, index: c_int) -> &'a str {
+    let mut len: c_long = 0;
+    let ptr = lua_tolstring(state, index, &mut len);
+    assert!(!ptr.is_null());
+    let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
+    std::str::from_utf8(bytes).unwrap()
 }
 
-#[test]
-fn test_metatablepointer() {
+#[cfg(test)]
+mod tests {
     use std::ptr;
-    unsafe {
-        let state = luaL_newstate();
-        assert!(state != ptr::null_mut());
 
-        lua_createtable(state, 0, 0);
-        assert!(lua_getmetatablepointer(state, -1).is_null());
+    use super::*;
 
-        lua_createtable(state, 0, 0);
-        let mt_ptr1 = lua_topointer(state, -1);
+    #[test]
+    fn test_luau() {
+        unsafe {
+            let state = luaL_newstate();
+            assert!(!state.is_null());
 
-        lua_setmetatable(state, -2);
-        let mt_ptr2 = lua_getmetatablepointer(state, -1);
-        assert_eq!(mt_ptr1, mt_ptr2);
+            // Enable JIT if supported
+            #[cfg(not(target_os = "emscripten"))]
+            if luau_codegen_supported() != 0 {
+                luau_codegen_create(state);
+            }
 
-        lua_close(state);
-    }
-}
+            luaL_openlibs(state);
 
-#[test]
-fn test_exceptions() {
-    use std::{ptr, slice, str};
-    unsafe {
-        let state = luaL_newstate();
-        assert!(state != ptr::null_mut());
+            lua_getglobal(state, c"_VERSION".as_ptr());
+            let version = to_string(state, -1);
 
-        unsafe extern "C-unwind" fn it_panics(state: *mut c_void) -> c_int {
-            luaL_errorL(state, "exception!\0".as_ptr().cast());
+            assert_eq!(version, "Luau");
+
+            let code = "local a, b = ... return a + b";
+            let mut bytecode_size = 0;
+            let bytecode = luau_compile(
+                code.as_ptr().cast(),
+                code.len(),
+                ptr::null_mut(),
+                &mut bytecode_size,
+            );
+            let result = luau_load(state, c"sum".as_ptr(), bytecode, bytecode_size, 0);
+            assert_eq!(result, 0);
+            free(bytecode.cast());
+
+            // Compile the function (JIT, if supported)
+            #[cfg(not(target_os = "emscripten"))]
+            if luau_codegen_supported() != 0 {
+                luau_codegen_compile(state, -1);
+            }
+
+            // Call the loaded function, with fuel: this fork's states start with none
+            luau_setfuel(state, 1_000);
+            lua_pushinteger(state, 123);
+            lua_pushinteger(state, 321);
+            lua_call(state, 2, 1);
+            assert_eq!(lua_tointegerx(state, -1, ptr::null_mut()), 444);
+
+            lua_close(state);
         }
+    }
 
-        lua_pushcclosurek(state, it_panics, ptr::null(), 0, ptr::null());
-        let result = lua_pcall(state, 0, 0, 0);
-        assert_eq!(result, 2); // LUA_ERRRUN
-        let s = {
-            let mut len: c_long = 0;
-            let version_ptr = lua_tolstring(state, -1, &mut len);
-            let s = slice::from_raw_parts(version_ptr as *const u8, len as usize);
-            str::from_utf8(s).unwrap()
-        };
-        assert_eq!(s, "exception!");
+    #[test]
+    fn test_metatablepointer() {
+        unsafe {
+            let state = luaL_newstate();
+            assert!(!state.is_null());
+
+            lua_createtable(state, 0, 0);
+            assert!(lua_getmetatablepointer(state, -1).is_null());
+
+            lua_createtable(state, 0, 0);
+            let mt_ptr1 = lua_topointer(state, -1);
+
+            lua_setmetatable(state, -2);
+            let mt_ptr2 = lua_getmetatablepointer(state, -1);
+            assert_eq!(mt_ptr1, mt_ptr2);
+
+            lua_close(state);
+        }
+    }
+
+    #[test]
+    fn test_exceptions() {
+        unsafe {
+            let state = luaL_newstate();
+            assert!(!state.is_null());
+
+            unsafe extern "C-unwind" fn it_panics(state: *mut c_void) -> c_int {
+                luaL_errorL(state, "exception!\0".as_ptr().cast());
+            }
+
+            lua_pushcclosurek(state, it_panics, ptr::null(), 0, ptr::null());
+            let result = lua_pcall(state, 0, 0, 0);
+            assert_eq!(result, 2); // LUA_ERRRUN
+            assert_eq!(to_string(state, -1), "exception!");
+        }
     }
 }

@@ -55,6 +55,7 @@ struct Lexeme
         BlockComment,
 
         Attribute,
+        AttributeOpen,
 
         BrokenString,
         BrokenComment,
@@ -87,6 +88,12 @@ struct Lexeme
         Reserved_END
     };
 
+    enum struct QuoteStyle
+    {
+        Single,
+        Double,
+    };
+
     Type type;
     Location location;
 
@@ -111,6 +118,8 @@ public:
     Lexeme(const Location& location, Type type, const char* name);
 
     unsigned int getLength() const;
+    unsigned int getBlockDepth() const;
+    QuoteStyle getQuoteStyle() const;
 
     std::string toString() const;
 };
@@ -127,6 +136,7 @@ public:
     std::pair<AstName, Lexeme::Type> getOrAddWithType(const char* name, size_t length);
     std::pair<AstName, Lexeme::Type> getWithType(const char* name, size_t length) const;
 
+    AstName getOrAdd(const char* name, size_t len);
     AstName getOrAdd(const char* name);
     AstName get(const char* name) const;
 
@@ -153,7 +163,7 @@ private:
 class Lexer
 {
 public:
-    Lexer(const char* buffer, std::size_t bufferSize, AstNameTable& names);
+    Lexer(const char* buffer, std::size_t bufferSize, AstNameTable& names, Position startPosition = {0, 0});
 
     void setSkipComments(bool skip);
     void setReadNames(bool read);
@@ -178,6 +188,19 @@ public:
 
     static bool fixupQuotedString(std::string& data);
     static void fixupMultilineString(std::string& data);
+
+    unsigned int getOffset() const
+    {
+        return offset;
+    }
+
+    enum class BraceType
+    {
+        InterpolatedString,
+        Normal
+    };
+
+    std::optional<Lexer::BraceType> peekBraceStackTop();
 
 private:
     char peekch() const;
@@ -229,12 +252,6 @@ private:
 
     bool skipComments;
     bool readNames;
-
-    enum class BraceType
-    {
-        InterpolatedString,
-        Normal
-    };
 
     std::vector<BraceType> braceStack;
 };

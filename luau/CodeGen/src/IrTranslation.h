@@ -1,6 +1,8 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include <optional>
+
 #include <stdint.h>
 
 #include "ltm.h"
@@ -27,12 +29,17 @@ void translateInstJump(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstJumpBack(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstJumpIf(IrBuilder& build, const Instruction* pc, int pcpos, bool not_);
 void translateInstJumpIfEq(IrBuilder& build, const Instruction* pc, int pcpos, bool not_);
+void translateInstJumpIfEqShortcut(IrBuilder& build, const Instruction* pc, int pcpos, bool not_);
 void translateInstJumpIfCond(IrBuilder& build, const Instruction* pc, int pcpos, IrCondition cond);
 void translateInstJumpX(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstJumpxEqNil(IrBuilder& build, const Instruction* pc, int pcpos);
+void translateInstJumpxEqNilShortcut(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstJumpxEqB(IrBuilder& build, const Instruction* pc, int pcpos);
+void translateInstJumpxEqBShortcut(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstJumpxEqN(IrBuilder& build, const Instruction* pc, int pcpos);
+void translateInstJumpxEqNShortcut(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstJumpxEqS(IrBuilder& build, const Instruction* pc, int pcpos);
+void translateInstJumpxEqSShortcut(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstBinary(IrBuilder& build, const Instruction* pc, int pcpos, TMS tm);
 void translateInstBinaryK(IrBuilder& build, const Instruction* pc, int pcpos, TMS tm);
 void translateInstBinaryRK(IrBuilder& build, const Instruction* pc, int pcpos, TMS tm);
@@ -53,6 +60,7 @@ IrOp translateFastCallN(
     IrOp customArgs,
     IrOp customArg3
 );
+std::optional<IrOp> translateFastPcall(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstForNPrep(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstForNLoop(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstForGPrepNext(IrBuilder& build, const Instruction* pc, int pcpos);
@@ -73,6 +81,9 @@ bool translateInstNamecall(IrBuilder& build, const Instruction* pc, int pcpos);
 void translateInstAndX(IrBuilder& build, const Instruction* pc, int pcpos, IrOp c);
 void translateInstOrX(IrBuilder& build, const Instruction* pc, int pcpos, IrOp c);
 void translateInstNewClosure(IrBuilder& build, const Instruction* pc, int pcpos);
+void translateInstCmpProto(IrBuilder& build, const Instruction* pc, int pcpos);
+void translateInstConstruct(IrBuilder& build, const Instruction* pc, int pcpos);
+IrOp translateFinConstruct(IrBuilder& build, const Instruction* pc, int pcpos);
 
 void beforeInstForNPrep(IrBuilder& build, const Instruction* pc, int pcpos);
 void afterInstForNLoop(IrBuilder& build, const Instruction* pc);

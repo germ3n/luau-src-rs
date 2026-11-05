@@ -2,10 +2,13 @@
 #include "Luau/CodeBlockUnwind.h"
 
 #include "Luau/CodeAllocator.h"
+#include "Luau/CodeGenCommon.h"
 #include "Luau/UnwindBuilder.h"
 
 #include <string.h>
 #include <stdlib.h>
+
+LUAU_FASTFLAGVARIABLE(LuauCodegenIntelMacUnwind)
 
 #if defined(_WIN32) && defined(CODEGEN_TARGET_X64)
 
@@ -17,12 +20,25 @@
 #endif
 #include <windows.h>
 
-#elif defined(__linux__) || defined(__APPLE__)
+#elif (defined(__linux__) || defined(__APPLE__)) && (defined(CODEGEN_TARGET_X64) || defined(CODEGEN_TARGET_A64))
 
-// Defined in unwind.h which may not be easily discoverable on various platforms
-extern "C" void __register_frame(const void*) __attribute__((weak));
-extern "C" void __deregister_frame(const void*) __attribute__((weak));
+// __register_frame and __deregister_frame are defined in libgcc or libc++
+// (depending on how it's built). We want to declare them as weak symbols
+// so that if they're provided by a shared library, we'll use them, and if
+// not, we'll disable some c++ exception handling support. However, if they're
+// declared as weak and the definitions are linked in a static library
+// that's not linked with whole-archive, then the symbols will technically be defined here,
+// and the linker won't look for the strong ones in the library.
+#ifndef LUAU_ENABLE_REGISTER_FRAME
+#define REGISTER_FRAME_WEAK __attribute__((weak))
+#else
+#define REGISTER_FRAME_WEAK
+#endif
 
+extern "C" void __register_frame(const void*) REGISTER_FRAME_WEAK;
+extern "C" void __deregister_frame(const void*) REGISTER_FRAME_WEAK;
+
+// TODO: wrap under defined(__linux__) after removal of FFlag::LuauCodegenIntelMacUnwind
 extern "C" void __unw_add_dynamic_fde() __attribute__((weak));
 #endif
 
@@ -48,7 +64,7 @@ namespace Luau
 namespace CodeGen
 {
 
-#if defined(__APPLE__) && defined(CODEGEN_TARGET_A64)
+#if defined(__APPLE__) && defined(CODEGEN_TARGET_A64) && !defined(CODEGEN_TARGET_A64_PTRAUTH_RETURNS)
 static int findDynamicUnwindSections(uintptr_t addr, unw_dynamic_unwind_sections_t* info)
 {
     // Define a minimal mach header for JIT'd code.
@@ -68,15 +84,30 @@ static int findDynamicUnwindSections(uintptr_t addr, unw_dynamic_unwind_sections
 }
 #endif
 
-#if defined(__linux__) || defined(__APPLE__)
+#if (defined(__linux__) || defined(__APPLE__)) && (defined(CODEGEN_TARGET_X64) || defined(CODEGEN_TARGET_A64))
 static void visitFdeEntries(char* pos, void (*cb)(const void*))
 {
-    // When using glibc++ unwinder, we need to call __register_frame/__deregister_frame on the entire .eh_frame data
-    // When using libc++ unwinder (libunwind), each FDE has to be handled separately
-    // libc++ unwinder is the macOS unwinder, but on Linux the unwinder depends on the library the executable is linked with
-    // __unw_add_dynamic_fde is specific to libc++ unwinder, as such we determine the library based on its existence
-    if (__unw_add_dynamic_fde == nullptr)
-        return cb(pos);
+    if (FFlag::LuauCodegenIntelMacUnwind)
+    {
+        // When using glibc++ unwinder, we need to call __register_frame/__deregister_frame on the entire .eh_frame data
+        // When using libc++ unwinder (libunwind), each FDE has to be handled separately
+        // On Linux the unwinder depends on the library the executable is linked with
+        // __unw_add_dynamic_fde is specific to libc++ unwinder, as such we determine the library based on its existence
+        // On macOS, libc++ unwinder is the official one, but older version did not expose __unw_add_dynamic_fde for detection
+#if defined(__linux__)
+        if (__unw_add_dynamic_fde == nullptr)
+            return cb(pos);
+#endif
+    }
+    else
+    {
+        // When using glibc++ unwinder, we need to call __register_frame/__deregister_frame on the entire .eh_frame data
+        // When using libc++ unwinder (libunwind), each FDE has to be handled separately
+        // libc++ unwinder is the macOS unwinder, but on Linux the unwinder depends on the library the executable is linked with
+        // __unw_add_dynamic_fde is specific to libc++ unwinder, as such we determine the library based on its existence
+        if (__unw_add_dynamic_fde == nullptr)
+            return cb(pos);
+    }
 
     for (;;)
     {
@@ -119,16 +150,19 @@ void* createBlockUnwindInfo(void* context, uint8_t* block, size_t blockSize, siz
     }
 #endif
 
-#elif defined(__linux__) || defined(__APPLE__)
-    if (!__register_frame)
+#elif (defined(__linux__) || defined(__APPLE__)) && (defined(CODEGEN_TARGET_X64) || defined(CODEGEN_TARGET_A64))
+    if (!&__register_frame)
         return nullptr;
 
     visitFdeEntries(unwindData, __register_frame);
 #endif
 
-#if defined(__APPLE__) && defined(CODEGEN_TARGET_A64)
-    // Starting from macOS 14, we need to register unwind section callback to state that our ABI doesn't require pointer authentication
-    // This might conflict with other JITs that do the same; unfortunately this is the best we can do for now.
+#if defined(__APPLE__) && defined(CODEGEN_TARGET_A64) && !defined(CODEGEN_TARGET_A64_PTRAUTH_RETURNS)
+    // On Apple arm64 targets, the default behavior of the system libunwind is
+    // to assume that JITted frames have PAC-signed return addresses.  If we are
+    // not signing our return addresses, provide the unwinder an arm64 mach header
+    // (not arm64e) for the JITted code so that it knows the JITted frames do not
+    // have signed return addresses.
     static unw_add_find_dynamic_unwind_sections_t unw_add_find_dynamic_unwind_sections =
         unw_add_find_dynamic_unwind_sections_t(dlsym(RTLD_DEFAULT, "__unw_add_find_dynamic_unwind_sections"));
     static int regonce = unw_add_find_dynamic_unwind_sections ? unw_add_find_dynamic_unwind_sections(findDynamicUnwindSections) : 0;
@@ -148,8 +182,8 @@ void destroyBlockUnwindInfo(void* context, void* unwindData)
         CODEGEN_ASSERT(!"Failed to deallocate function table");
 #endif
 
-#elif defined(__linux__) || defined(__APPLE__)
-    if (!__deregister_frame)
+#elif (defined(__linux__) || defined(__APPLE__)) && (defined(CODEGEN_TARGET_X64) || defined(CODEGEN_TARGET_A64))
+    if (!&__deregister_frame)
     {
         CODEGEN_ASSERT(!"Cannot deregister unwind information");
         return;
@@ -163,15 +197,12 @@ bool isUnwindSupported()
 {
 #if defined(_WIN32) && defined(CODEGEN_TARGET_X64)
     return true;
-#elif defined(__ANDROID__)
-    // Current unwind information is not compatible with Android
-    return false;
 #elif defined(__APPLE__) && defined(CODEGEN_TARGET_A64)
     char ver[256];
     size_t verLength = sizeof(ver);
     // libunwind on macOS 12 and earlier (which maps to osrelease 21) assumes JIT frames use pointer authentication without a way to override that
     return sysctlbyname("kern.osrelease", ver, &verLength, NULL, 0) == 0 && atoi(ver) >= 22;
-#elif defined(__linux__) || defined(__APPLE__)
+#elif (defined(__linux__) || defined(__APPLE__)) && (defined(CODEGEN_TARGET_X64) || defined(CODEGEN_TARGET_A64))
     return true;
 #else
     return false;

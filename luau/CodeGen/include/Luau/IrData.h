@@ -2,10 +2,13 @@
 #pragma once
 
 #include "Luau/Bytecode.h"
+#include "Luau/CodeGenOptions.h"
+#include "Luau/DenseHash.h"
 #include "Luau/IrAnalysis.h"
 #include "Luau/Label.h"
 #include "Luau/RegisterX64.h"
 #include "Luau/RegisterA64.h"
+#include "Luau/SmallVector.h"
 
 #include <optional>
 #include <vector>
@@ -13,12 +16,24 @@
 #include <stdint.h>
 #include <string.h>
 
+#define OP_A(inst) getOp(inst, 0)
+#define OP_B(inst) getOp(inst, 1)
+#define OP_C(inst) getOp(inst, 2)
+#define OP_D(inst) getOp(inst, 3)
+#define OP_E(inst) getOp(inst, 4)
+#define OP_F(inst) getOp(inst, 5)
+#define OP_G(inst) getOp(inst, 6)
+
 struct Proto;
 
 namespace Luau
 {
 namespace CodeGen
 {
+
+struct LoweringStats;
+
+constexpr uint8_t kUnknownTag = 0xff;
 
 // IR extensions to LuauBuiltinFunction enum (these only exist inside IR, and start from 256 to avoid collisions)
 enum
@@ -52,7 +67,11 @@ enum class IrCmd : uint8_t
     // A: Rn
     LOAD_INT,
 
-    // Load a float field from vector as a double number
+    // Load an int64 from TValue
+    // A: Rn
+    LOAD_INT64,
+
+    // Load a float field from vector (use FLOAT_TO_NUM to convert to double)
     // A: Rn or Kn
     // B: int (offset from the start of TValue)
     LOAD_FLOAT,
@@ -67,18 +86,18 @@ enum class IrCmd : uint8_t
     LOAD_ENV,
 
     // Get pointer (TValue) to table array at index
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     // B: int
     GET_ARR_ADDR,
 
     // Get pointer (LuaNode) to table node element at the active cached slot index
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     // B: unsigned int (pcpos)
     // C: Kn
     GET_SLOT_NODE_ADDR,
 
     // Get pointer (LuaNode) to table node element at the main position of the specified key hash
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     // B: unsigned int (hash)
     GET_HASH_NODE_ADDR,
 
@@ -113,11 +132,18 @@ enum class IrCmd : uint8_t
     // B: int
     STORE_INT,
 
-    // Store a vector into TValue
+    // Store an int64 into TValue
     // A: Rn
-    // B: double (x)
-    // C: double (y)
-    // D: double (z)
+    // B: int64
+    STORE_INT64,
+
+    // Store a vector into TValue
+    // When optional 'E' tag is present, it is written out to the TValue as well
+    // A: Rn
+    // B: float (x)
+    // C: float (y)
+    // D: float (z)
+    // E: tag (optional)
     STORE_VECTOR,
 
     // Store a TValue into memory
@@ -138,6 +164,49 @@ enum class IrCmd : uint8_t
     ADD_INT,
     SUB_INT,
 
+    // Add two int64s
+    // A, B: int64
+    ADD_INT64,
+    // Subtract two int64s
+    // A, B: int64
+    SUB_INT64,
+    // Multiply two int64s
+    // A, B: int64
+    MUL_INT64,
+    // Signed truncating division
+    // A, B: int64
+    DIV_INT64,
+    // Signed floored division
+    // A, B: int64
+    IDIV_INT64,
+    // Unsigned division
+    // A, B: int64
+    UDIV_INT64,
+    // Signed truncating remainder
+    // A, B: int64
+    REM_INT64,
+    // Unsigned remainder
+    // A, B: int64
+    UREM_INT64,
+    // Signed floored modulus
+    // A, B: int64
+    MOD_INT64,
+
+    // Guard against int64 RFC behavior
+    // If b is 0, throws a division by zero error.
+    // If a is -2^63 and b is -1, throws an overflow error.
+    // A, B: int64
+    // C: block/vmexit/undef
+    CHECK_DIV_INT64,
+
+    // Sign extend an 8-bit value
+    // A: int
+    SEXTI8_INT,
+
+    // Sign extend a 16-bit value
+    // A: int
+    SEXTI16_INT,
+
     // Add/Sub/Mul/Div/Idiv/Mod two double numbers
     // A, B: double
     // In final x64 lowering, B can also be Rn or Kn
@@ -147,6 +216,9 @@ enum class IrCmd : uint8_t
     DIV_NUM,
     IDIV_NUM,
     MOD_NUM,
+    // A * B + C
+    // A, B, C: double
+    MULADD_NUM,
 
     // Get the minimum/maximum of two numbers
     // If one of the values is NaN, 'B' is returned as the result
@@ -183,20 +255,107 @@ enum class IrCmd : uint8_t
     // A: double
     SIGN_NUM,
 
+    // Add/Sub/Mul/Div/Idiv/Mod two float numbers
+    // A, B: float
+    // In final x64 lowering, B can also be Rn or Kn
+    ADD_FLOAT,
+    SUB_FLOAT,
+    MUL_FLOAT,
+    DIV_FLOAT,
+
+    // Get the minimum/maximum of two numbers
+    // If one of the values is NaN, 'B' is returned as the result
+    // A, B: float
+    MIN_FLOAT,
+    MAX_FLOAT,
+
+    // Negate a float number
+    // A: float
+    UNM_FLOAT,
+
+    // Round number to negative infinity
+    // A: float
+    FLOOR_FLOAT,
+
+    // Round number to positive infinity
+    // A: float
+    CEIL_FLOAT,
+
+    // Get square root of the argument
+    // A: float
+    SQRT_FLOAT,
+
+    // Get absolute value of the argument
+    // A: float
+    ABS_FLOAT,
+
+    // Get the sign of the argument
+    // A: float
+    SIGN_FLOAT,
+
+    // Select B if C == D, otherwise select A
+    // A, B: double (endpoints)
+    // C, D: double (condition arguments)
+    SELECT_NUM,
+
+    // Select B if C cond D, otherwise select A
+    // A, B: int64 (endpoints)
+    // C, D: int64 (condition arguments)
+    // E: condition
+    SELECT_INT64,
+
+    // For each lane in the vector, select B if C == D, otherwise select A
+    // A, B: TValue (endpoints)
+    // C, D: TValue (condition arguments)
+    SELECT_VEC,
+
+    // Select one of the TValues based on the truthyness of A
+    // A: TValue
+    // B: TValue (if true)
+    // C: TValue (if false)
+    SELECT_IF_TRUTHY,
+
     // Add/Sub/Mul/Div/Idiv two vectors
-    // A, B: TValue
+    // A, B: TValue (vector)
     ADD_VEC,
     SUB_VEC,
     MUL_VEC,
     DIV_VEC,
+    IDIV_VEC,
+    // Lanewise A * B + C
+    // A, B, C: TValue (vector)
+    MULADD_VEC,
 
     // Negate a vector
-    // A: TValue
+    // A: TValue (vector)
     UNM_VEC,
 
-    // Compute dot product between two vectors
-    // A, B: TValue
+    // Get the minimum/maximum of two vector elements
+    // If one of the element values is NaN, 'B' is returned as the result
+    // A, B: TValue (vector)
+    MIN_VEC,
+    MAX_VEC,
+
+    // Round vector elements to negative infinity
+    // A: TValue (vector)
+    FLOOR_VEC,
+
+    // Round vector elements to positive infinity
+    // A: TValue (vector)
+    CEIL_VEC,
+
+    // Get absolute value of vector elements
+    // A: TValue (vector)
+    ABS_VEC,
+
+    // Compute dot product between two vectors as a float number (use FLOAT_TO_NUM to convert to double)
+    // A, B: TValue (vector)
     DOT_VEC,
+
+    // Extract a component of a vector (use FLOAT_TO_NUM to convert to double)
+    // A: TValue (vector)
+    // B: int (0-3 index)
+    EXTRACT_VEC,
 
     // Compute Luau 'not' operation on destructured TValue
     // A: tag
@@ -207,6 +366,28 @@ enum class IrCmd : uint8_t
     // A, B: Rn
     // C: condition
     CMP_ANY,
+
+    // Perform a comparison of two integer numbers. Result is an integer register containing 0 or 1
+    // A, B: int
+    // C: condition
+    CMP_INT,
+
+    // Perform a comparison of two int64 numbers. Result is an integer register containing 0 or 1
+    // A, B: int64
+    // C: condition
+    CMP_INT64,
+
+    // Perform a comparison of two tags. Result is an integer register containing 0 or 1
+    CMP_TAG,
+    // A, B: tag
+    // C: condition (eq/not_eq)
+
+    // Perform tag and value comparison. Result is an integer register containing 0 or 1
+    CMP_SPLIT_TVALUE,
+    // A: tag
+    // B: tag (constant: boolean/number/string)
+    // C, D: value
+    // E: condition (eq/not_eq)
 
     // Unconditional jump
     // A: block/vmexit/undef
@@ -237,6 +418,13 @@ enum class IrCmd : uint8_t
     // E: block (if false)
     JUMP_CMP_INT,
 
+    // Perform a conditional jump based on the result of int64 comparison
+    // A, B: int64
+    // C: condition
+    // D: block (if true)
+    // E: block (if false)
+    JUMP_CMP_INT64,
+
     // Jump if pointers are equal
     // A, B: pointer (*)
     // C: block (if true)
@@ -249,6 +437,13 @@ enum class IrCmd : uint8_t
     // D: block (if true)
     // E: block (if false)
     JUMP_CMP_NUM,
+
+    // Perform a conditional jump based on the result of float comparison
+    // A, B: float
+    // C: condition
+    // D: block (if true)
+    // E: block (if false)
+    JUMP_CMP_FLOAT,
 
     // Perform jump based on a numerical loop condition (step > 0 ? idx <= limit : limit <= idx)
     // A: double (index)
@@ -266,7 +461,7 @@ enum class IrCmd : uint8_t
     JUMP_SLOT_MATCH,
 
     // Get table length
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     TABLE_LEN,
 
     // Get string length
@@ -279,11 +474,11 @@ enum class IrCmd : uint8_t
     NEW_TABLE,
 
     // Duplicate a table
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     DUP_TABLE,
 
     // Insert an integer key into a table and return the pointer to inserted value (TValue)
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     // B: int (key)
     TABLE_SETNUM,
 
@@ -303,26 +498,59 @@ enum class IrCmd : uint8_t
     // B: int (tag)
     NEW_USERDATA,
 
+    // Create new heap-allocated vector
+    // A: double (x)
+    // B: double (y)
+    // C: double (z)
+    NEW_VECTOR,
+
     // Convert integer into a double number
     // A: int
     INT_TO_NUM,
+
+    // Convert int64 into a double number
+    // A: int64
+    INT64_TO_NUM,
+
+    // Convert unsigned integer into a double number
+    // A: uint
     UINT_TO_NUM,
+
+    // Convert unsigned integer into a float number
+    // A: uint
+    UINT_TO_FLOAT,
 
     // Converts a double number to an integer. 'A' may be any representable integer in a double.
     // A: double
     NUM_TO_INT,
 
+    // Converts a double number to a 64 bit integer. 'A' may be any representable integer in a double.
+    // A: double
+    NUM_TO_INT64,
+
     // Converts a double number to an unsigned integer. For out-of-range values of 'A', the result is arch-specific.
     // A: double
     NUM_TO_UINT,
 
-    // Converts a double number to a vector with the value in X/Y/Z
+    // Converts a float number to a double
+    // A: float
+    FLOAT_TO_NUM,
+
+    // Converts a double number to a float
     // A: double
-    NUM_TO_VEC,
+    NUM_TO_FLOAT,
+
+    // Converts a float number to a vector with the value in X/Y/Z (use NUM_TO_FLOAT to convert from double)
+    // A: float
+    FLOAT_TO_VEC,
 
     // Adds VECTOR type tag to a vector, preserving X/Y/Z components
     // A: TValue
     TAG_VECTOR,
+
+    // Clear high register bits of an unsigned integer register. Used to sanitize value of 'producesDirtyHighRegisterBits' instructions.
+    // A: uint
+    TRUNCATE_UINT,
 
     // Adjust stack top (L->top) to point at 'B' TValues *after* the specified register
     // This is used to return multiple values
@@ -357,6 +585,16 @@ enum class IrCmd : uint8_t
     // B: block (fallback)
     CHECK_FASTCALL_RES,
 
+    // Call the fast protected call function
+    // - if function yields, performs a yield
+    // - if a target Luau function needs to run, switches execution to it
+    // - continues if the target call resolved immediately
+    // A: Rn (result start)
+    // B: unsigned int (protected function id)
+    // C: int (argument count or -1 to use all arguments up to stack top)
+    // D: int (result count or -1 to preserve all results and adjust stack top)
+    INVOKE_FASTPCALL,
+
     // Fallback functions
 
     // Perform an arithmetic operation on TValues of any type
@@ -371,6 +609,12 @@ enum class IrCmd : uint8_t
     // B: Rn
     DO_LEN,
 
+    // Construct a class object or a table, if the constructor is a class and shape in the CONSTRUCT feedback slot matches it
+    // A: Rn (where to store the result)
+    // B: Rn (constructor)
+    // C: unsigned int (feedback slot id)
+    CONSTRUCT,
+
     // Lookup a value in TValue of any type using a key of any type
     // A: Rn (where to store the result)
     // B: Rn
@@ -383,10 +627,12 @@ enum class IrCmd : uint8_t
     // C: Rn or unsigned int (key)
     SET_TABLE,
 
-    // Lookup a value in the environment
+    // Store an import from constant or the import path
     // A: Rn (where to store the result)
-    // B: unsigned int (import path)
-    GET_IMPORT,
+    // B: Kn
+    // C: unsigned int (import path)
+    // D: unsigned int (pcpos)
+    GET_CACHED_IMPORT,
 
     // Concatenate multiple TValues into a string
     // A: Rn (value start)
@@ -395,14 +641,13 @@ enum class IrCmd : uint8_t
     // Note: all referenced registers might be modified in the operation
     CONCAT,
 
-    // Load function upvalue into stack slot
-    // A: Rn
-    // B: UPn
+    // Load function upvalue
+    // A: UPn
     GET_UPVALUE,
 
-    // Store TValue from stack slot into a function upvalue
+    // Store TValue into a function upvalue
     // A: UPn
-    // B: Rn
+    // B: TValue
     // C: tag/undef (tag of the value that was written)
     SET_UPVALUE,
 
@@ -423,24 +668,29 @@ enum class IrCmd : uint8_t
     CHECK_TRUTHY,
 
     // Guard against readonly table
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     // B: block/vmexit/undef
     // When undef is specified instead of a block, execution is aborted on check failure
     CHECK_READONLY,
 
     // Guard against table having a metatable
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     // B: block/vmexit/undef
     // When undef is specified instead of a block, execution is aborted on check failure
     CHECK_NO_METATABLE,
 
     // Guard against executing in unsafe environment, exits to VM on check failure
-    // A: vmexit/vmexit/undef
+    // A: block/vmexit/undef
     // When undef is specified, execution is aborted on check failure
     CHECK_SAFE_ENV,
 
+    // Guard against executing in a non-yieldable context, exits to VM on check failure
+    // A: block/vmexit/undef
+    // When undef is specified, execution is aborted on check failure
+    CHECK_YIELDABLE,
+
     // Guard against index overflowing the table array size
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     // B: int (index)
     // C: block/vmexit/undef
     // When undef is specified instead of a block, execution is aborted on check failure
@@ -465,11 +715,14 @@ enum class IrCmd : uint8_t
     // When undef is specified instead of a block, execution is aborted on check failure
     CHECK_NODE_VALUE,
 
-    // Guard against access at specified offset/size overflowing the buffer length
+    // Guard against access at specified offset with [min, max) range of bytes overflowing the buffer length
+    // When base offset source number is provided, instruction will additionally validate that the integer and double versions of base are exact
     // A: pointer (buffer)
-    // B: int (offset)
-    // C: int (size)
-    // D: block/vmexit/undef
+    // B: int (base offset)
+    // C: int (access range min inclusive)
+    // D: int (access range max exclusive)
+    // E: double/undef (base offset source double)
+    // F: block/vmexit/undef
     // When undef is specified instead of a block, execution is aborted on check failure
     CHECK_BUFFER_LEN,
 
@@ -479,6 +732,27 @@ enum class IrCmd : uint8_t
     // C: block/vmexit/undef
     // When undef is specified instead of a block, execution is aborted on check failure
     CHECK_USERDATA_TAG,
+
+    // Guard against the result of number comparison being false
+    // A, B: number
+    // C: condition
+    // D: block/vmexit/undef
+    // When undef is specified instead of a block, execution is aborted on check failure
+    CHECK_CMP_NUM,
+
+    // Guard against the result of integer comparison being false
+    // A, B: int
+    // C: condition
+    // D: block/vmexit/undef
+    // When undef is specified instead of a block, execution is aborted on check failure
+    CHECK_CMP_INT,
+
+    // Guard against the result of int64 comparison being false
+    // A, B: int64
+    // C: condition
+    // D: block/vmexit/undef
+    // When undef is specified instead of a block, execution is aborted on check failure
+    CHECK_CMP_INT64,
 
     // Special operations
 
@@ -496,11 +770,11 @@ enum class IrCmd : uint8_t
     BARRIER_OBJ,
 
     // Handle GC write barrier (backwards) for a write into a table
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     BARRIER_TABLE_BACK,
 
     // Handle GC write barrier (forward) for a write into a table
-    // A: pointer (Table)
+    // A: pointer (LuaTable)
     // B: Rn (TValue that was written to the object)
     // C: tag/undef (tag of the value that was written)
     BARRIER_TABLE_FORWARD,
@@ -626,15 +900,58 @@ enum class IrCmd : uint8_t
     // C: Kn (prototype)
     FALLBACK_DUPCLOSURE,
 
-    // Prepare loop variables for a generic for loop, jump to the loop backedge unconditionally
+    // Prepare loop variables for a generic for loop, jump to the loop back edge unconditionally
     // A: unsigned int (bytecode instruction index)
     // B: Rn (loop state start, updates Rn Rn+1 Rn+2)
     // C: block
     FALLBACK_FORGPREP,
 
     // Instruction that passes value through, it is produced by constant folding and users substitute it with the value
-    SUBSTITUTE,
     // A: operand of any type
+    SUBSTITUTE,
+
+    // Pseudo instruction to mark VM registers as implicitly used at the location
+    // A: Rn (start)
+    // B: int (count, -1 to mark all registers after start)
+    MARK_USED,
+
+    // Pseudo instruction to mark VM registers as dead at the location
+    // A: Rn (start)
+    // B: int (count, -1 to mark all registers after start)
+    MARK_DEAD,
+
+    // Performs bitwise and/xor/or on two int64
+    // A, B: int64
+    BITAND_INT64,
+    BITXOR_INT64,
+    BITOR_INT64,
+
+    // Performs bitwise not on an int64
+    // A: int64
+    BITNOT_INT64,
+
+    // Performs bitwise shift on an int64
+    // A: int64 (source)
+    // B: int64 (shift amount; negative reverses direction, |amount| >= 64 returns 0 or sign-fill)
+    BITLSHIFT_INT64,
+    BITRSHIFT_INT64,
+    BITARSHIFT_INT64,
+
+    // Performs bitwise rotate on an int64
+    // A: int64 (source)
+    // B: int64 (rotate amount, mod 64)
+    BITLROTATE_INT64,
+    BITRROTATE_INT64,
+
+    // Returns the number of consecutive zero bits in A
+    // Result is Int64 (not Int) for consistency with other int64 operations, even though value is in [0, 64]
+    // A: int64
+    BITCOUNTLZ_INT64,
+    BITCOUNTRZ_INT64,
+
+    // Swap byte order in A
+    // A: int64
+    BYTESWAP_INT64,
 
     // Performs bitwise and/xor/or on two unsigned integers
     // A, B: int
@@ -725,15 +1042,15 @@ enum class IrCmd : uint8_t
     // C: int (value)
     BUFFER_WRITEI32,
 
-    // Read float value (converted to double) from buffer storage at specified offset
+    // Read float value (use FLOAT_TO_NUM to convert to double) from buffer storage at specified offset
     // A: pointer (buffer)
     // B: int (offset)
     BUFFER_READF32,
 
-    // Write float value (converted from double) to buffer storage at specified offset
+    // Write float value (use NUM_TO_FLOAT to convert from double) to buffer storage at specified offset
     // A: pointer (buffer)
     // B: int (offset)
-    // C: double (value)
+    // C: float (value)
     BUFFER_WRITEF32,
 
     // Read double value from buffer storage at specified offset
@@ -746,14 +1063,34 @@ enum class IrCmd : uint8_t
     // B: int (offset)
     // C: double (value)
     BUFFER_WRITEF64,
+
+    // Read int64 value from buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    BUFFER_READI64,
+
+    // Write i64/u64 value to buffer storage at specified offset
+    // A: pointer (buffer)
+    // B: int (offset)
+    // C: int64 (value)
+    BUFFER_WRITEI64,
+
+    // Perform a conditional jump based on the result of Proto ID comparison
+    // A: closure pointer
+    // B: protoid
+    // C: block (if true)
+    // D: block (if false)
+    JUMP_CMP_PROTOID,
 };
 
 enum class IrConstKind : uint8_t
 {
     Int,
+    Int64,
     Uint,
     Double,
     Tag,
+    Import,
 };
 
 struct IrConst
@@ -763,6 +1100,7 @@ struct IrConst
     union
     {
         int valueInt;
+        int64_t valueInt64;
         unsigned valueUint;
         double valueDouble;
         uint8_t valueTag;
@@ -823,7 +1161,7 @@ enum class IrOpKind : uint32_t
 
 // VmExit uses a special value to indicate that pcpos update should be skipped
 // This is only used during type checking at function entry
-constexpr uint32_t kVmExitEntryGuardPc = (1u << 28) - 1;
+inline constexpr uint32_t kVmExitEntryGuardPc = (1u << 28) - 1;
 
 struct IrOp
 {
@@ -861,26 +1199,27 @@ enum class IrValueKind : uint8_t
     None,
     Tag,
     Int,
+    Int64,
     Pointer,
+    Float,
     Double,
     Tvalue,
+
+    Count
 };
+
+using IrOps = SmallVector<IrOp, 6>;
 
 struct IrInst
 {
     IrCmd cmd;
 
     // Operands
-    IrOp a;
-    IrOp b;
-    IrOp c;
-    IrOp d;
-    IrOp e;
-    IrOp f;
-    IrOp g;
+    // All frequently used instructions use only A-F slots.
+    IrOps ops;
 
     uint32_t lastUse = 0;
-    uint16_t useCount = 0;
+    uint32_t useCount = 0;
 
     // Location of the result (optional)
     X64::RegisterX64 regX64 = X64::noreg;
@@ -890,8 +1229,44 @@ struct IrInst
     bool needsReload = false;
 };
 
+inline IrOp& getOp(IrInst& inst, uint32_t idx)
+{
+    if (LUAU_UNLIKELY(idx >= inst.ops.size()))
+    {
+        inst.ops.resize(idx + 1);
+    }
+    return inst.ops[idx];
+}
+
+inline IrOp& getOp(IrInst* inst, uint32_t idx)
+{
+    return getOp(*inst, idx);
+}
+
+inline bool hasOp(IrInst& inst, uint32_t idx)
+{
+    return idx < inst.ops.size();
+}
+
+// TODO: once we update kind checks to not use getOp, it will no longer cause a resize and second part can be removed
+#define HAS_OP_A(inst) (0 < (inst).ops.size() && (inst).ops[0].kind != IrOpKind::None)
+#define HAS_OP_B(inst) (1 < (inst).ops.size() && (inst).ops[1].kind != IrOpKind::None)
+#define HAS_OP_C(inst) (2 < (inst).ops.size() && (inst).ops[2].kind != IrOpKind::None)
+#define HAS_OP_D(inst) (3 < (inst).ops.size() && (inst).ops[3].kind != IrOpKind::None)
+#define HAS_OP_E(inst) (4 < (inst).ops.size() && (inst).ops[4].kind != IrOpKind::None)
+#define HAS_OP_F(inst) (5 < (inst).ops.size() && (inst).ops[5].kind != IrOpKind::None)
+#define HAS_OP_G(inst) (6 < (inst).ops.size() && (inst).ops[6].kind != IrOpKind::None)
+
+#define OPT_OP_A(inst) (0 < (inst).ops.size() && (inst).ops[0].kind != IrOpKind::None ? (inst).ops[0] : IrOp{})
+#define OPT_OP_B(inst) (1 < (inst).ops.size() && (inst).ops[1].kind != IrOpKind::None ? (inst).ops[1] : IrOp{})
+#define OPT_OP_C(inst) (2 < (inst).ops.size() && (inst).ops[2].kind != IrOpKind::None ? (inst).ops[2] : IrOp{})
+#define OPT_OP_D(inst) (3 < (inst).ops.size() && (inst).ops[3].kind != IrOpKind::None ? (inst).ops[3] : IrOp{})
+#define OPT_OP_E(inst) (4 < (inst).ops.size() && (inst).ops[4].kind != IrOpKind::None ? (inst).ops[4] : IrOp{})
+#define OPT_OP_F(inst) (5 < (inst).ops.size() && (inst).ops[5].kind != IrOpKind::None ? (inst).ops[5] : IrOp{})
+#define OPT_OP_G(inst) (6 < (inst).ops.size() && (inst).ops[6].kind != IrOpKind::None ? (inst).ops[6] : IrOp{})
+
 // When IrInst operands are used, current instruction index is often required to track lifetime
-constexpr uint32_t kInvalidInstIdx = ~0u;
+inline constexpr uint32_t kInvalidInstIdx = ~0u;
 
 struct IrInstHash
 {
@@ -926,13 +1301,8 @@ struct IrInstHash
         uint32_t h = 25;
 
         h = mix(h, uint32_t(key.cmd));
-        h = mix(h, key.a);
-        h = mix(h, key.b);
-        h = mix(h, key.c);
-        h = mix(h, key.d);
-        h = mix(h, key.e);
-        h = mix(h, key.f);
-        h = mix(h, key.g);
+        for (size_t i = 0; i < 7; i++)
+            h = mix(h, i < uint32_t(key.ops.size()) ? key.ops[i] : IrOp{});
 
         // MurmurHash2 tail
         h ^= h >> 13;
@@ -947,7 +1317,35 @@ struct IrInstEq
 {
     bool operator()(const IrInst& a, const IrInst& b) const
     {
-        return a.cmd == b.cmd && a.a == b.a && a.b == b.b && a.c == b.c && a.d == b.d && a.e == b.e && a.f == b.f && a.g == b.g;
+        if (a.cmd != b.cmd)
+            return false;
+        if (a.ops.size() == b.ops.size())
+        {
+            for (size_t i = 0; i < a.ops.size(); i++)
+                if (a.ops[i] != b.ops[i])
+                    return false;
+        }
+        else if (a.ops.size() < b.ops.size())
+        {
+            size_t i = 0;
+            for (; i < a.ops.size(); i++)
+                if (a.ops[i] != b.ops[i])
+                    return false;
+            for (; i < b.ops.size(); i++)
+                if (b.ops[i].kind != IrOpKind::None)
+                    return false;
+        }
+        else
+        {
+            size_t i = 0;
+            for (; i < b.ops.size(); i++)
+                if (a.ops[i] != b.ops[i])
+                    return false;
+            for (; i < a.ops.size(); i++)
+                if (a.ops[i].kind != IrOpKind::None)
+                    return false;
+        }
+        return true;
     }
 };
 
@@ -957,14 +1355,21 @@ enum class IrBlockKind : uint8_t
     Fallback,
     Internal,
     Linearized,
+    ExitSync,
     Dead,
 };
+
+inline constexpr uint32_t kBlockNoStartPc = ~0u;
+
+inline constexpr uint8_t kBlockFlagSafeEnvCheck = 1 << 0;
+inline constexpr uint8_t kBlockFlagSafeEnvClear = 1 << 1;
+inline constexpr uint8_t kBlockFlagEntryArgCheck = 1 << 2;
 
 struct IrBlock
 {
     IrBlockKind kind;
-
-    uint16_t useCount = 0;
+    uint8_t flags = 0;
+    uint32_t useCount = 0;
 
     // 'start' and 'finish' define an inclusive range of instructions which belong to this block inside the function
     // When block has been constructed, 'finish' always points to the first and only terminating instruction
@@ -974,6 +1379,9 @@ struct IrBlock
     uint32_t sortkey = ~0u;
     uint32_t chainkey = 0;
     uint32_t expectedNextBlock = ~0u;
+
+    // Bytecode PC position at which the block was generated
+    uint32_t startpc = kBlockNoStartPc;
 
     Label label;
 };
@@ -1018,6 +1426,49 @@ struct BytecodeTypeInfo
     std::vector<uint32_t> regTypeOffsets;
 };
 
+struct ValueRestoreLocation
+{
+    IrOp op;                                  // Operand representing the location (Rn/Kn)
+    IrValueKind kind;                         // The kind of value at the restore location
+    IrCmd conversionCmd;                      // Type conversion instruction that was used to store the value at the restore location
+    bool lazy;                                // This location comes from a DSE hint and is emitted on demand (see StoreLocationHint)
+    uint32_t sourceInstIdx = kInvalidInstIdx; // Instruction that is the source of the conversion
+};
+
+struct StoreLocationHint
+{
+    IrOp op;          // Operand representing available location (Rn)
+    uint32_t instIdx; // Value that was supposed to be stored there
+    IrValueKind kind; // Value kind
+};
+
+struct VmExitStoreRecord
+{
+    uint32_t instIdx = kInvalidInstIdx;
+    IrInst backup;
+};
+
+struct VmExitStoreInfo
+{
+    uint8_t reg = 0;
+    SmallVector<VmExitStoreRecord, 2> stores;
+};
+
+struct VmExitSyncInfo
+{
+    std::vector<VmExitStoreInfo> regStores;
+
+    IrOp block;
+    IrOp vmExit;
+    SmallVector<IrOp, 2> argOps;
+};
+
+struct VmEnvironmentInfo
+{
+    bool hasPcall = false;
+    bool hasXpcall = false;
+};
+
 struct IrFunction
 {
     std::vector<IrBlock> blocks;
@@ -1030,17 +1481,41 @@ struct IrFunction
     std::vector<BytecodeMapping> bcMapping;
     uint32_t entryBlock = 0;
     uint32_t entryLocation = 0;
+    uint32_t endLocation = 0;
+
+    std::vector<uint32_t> extraNativeData;
 
     // For each instruction, an operand that can be used to recompute the value
-    std::vector<IrOp> valueRestoreOps;
+    std::vector<ValueRestoreLocation> valueRestoreOps;
     std::vector<uint32_t> validRestoreOpBlocks;
+    DenseHashMap<uint32_t, StoreLocationHint> storeLocationHints;
 
-    BytecodeTypeInfo bcTypeInfo;
+    DenseHashMap<uint32_t, VmExitSyncInfo> vmExitInfo;
+    DenseHashMap<uint32_t, uint32_t> blockToVmExitMap;
+
+    BytecodeTypeInfo bcOriginalTypeInfo; // Bytecode type information as loaded
+    BytecodeTypeInfo bcTypeInfo;         // Bytecode type information with additional inferences
+
+    VmEnvironmentInfo envInfo;
 
     Proto* proto = nullptr;
     bool variadic = false;
 
     CfgInfo cfg;
+
+    LoweringStats* stats = nullptr;
+
+    // Taken from CompilationOptions for easy access
+    bool recordCounters = false;
+    bool recordFeedback = false;
+
+    uint64_t jitRngState = 0; // PCG32 state for NOP padding; seeded per-function in lowerFunction
+
+    // Stores register tags that are known after constant propagating through a block, indexed by that block's index
+    std::vector<std::vector<uint8_t>> blockExitTags; // blockIdx → tag array
+
+    // Known VM register tag values on fallback entry (intersection of data from each individual jump point)
+    std::vector<std::vector<uint8_t>> fallbackEntryTags;
 
     IrBlock& blockOp(IrOp op)
     {
@@ -1097,6 +1572,14 @@ struct IrFunction
         return value.valueInt;
     }
 
+    int64_t int64Op(IrOp op)
+    {
+        IrConst& value = constOp(op);
+
+        CODEGEN_ASSERT(value.kind == IrConstKind::Int64);
+        return value.valueInt64;
+    }
+
     std::optional<int> asIntOp(IrOp op)
     {
         if (op.kind != IrOpKind::Constant)
@@ -1110,11 +1593,32 @@ struct IrFunction
         return value.valueInt;
     }
 
+    std::optional<int64_t> asInt64Op(IrOp op)
+    {
+        if (op.kind != IrOpKind::Constant)
+            return std::nullopt;
+
+        IrConst& value = constOp(op);
+
+        if (value.kind != IrConstKind::Int64)
+            return std::nullopt;
+
+        return value.valueInt64;
+    }
+
     unsigned uintOp(IrOp op)
     {
         IrConst& value = constOp(op);
 
         CODEGEN_ASSERT(value.kind == IrConstKind::Uint);
+        return value.valueUint;
+    }
+
+    unsigned importOp(IrOp op)
+    {
+        IrConst& value = constOp(op);
+
+        CODEGEN_ASSERT(value.kind == IrConstKind::Import);
         return value.valueUint;
     }
 
@@ -1166,15 +1670,25 @@ struct IrFunction
         return uint32_t(&inst - instructions.data());
     }
 
-    void recordRestoreOp(uint32_t instIdx, IrOp location)
+    void recordRestoreLocation(uint32_t instIdx, ValueRestoreLocation location)
     {
+        CODEGEN_ASSERT(location.op.kind == IrOpKind::None || location.op.kind == IrOpKind::VmReg || location.op.kind == IrOpKind::VmConst);
+
         if (instIdx >= valueRestoreOps.size())
             valueRestoreOps.resize(instIdx + 1);
 
         valueRestoreOps[instIdx] = location;
     }
 
-    IrOp findRestoreOp(uint32_t instIdx, bool limitToCurrentBlock) const
+    void materializeRestoreLocation(uint32_t instIdx)
+    {
+        CODEGEN_ASSERT(instIdx < valueRestoreOps.size());
+        CODEGEN_ASSERT(valueRestoreOps[instIdx].lazy);
+
+        valueRestoreOps[instIdx].lazy = false;
+    }
+
+    ValueRestoreLocation findRestoreLocation(uint32_t instIdx, bool limitToCurrentBlock) const
     {
         if (instIdx >= valueRestoreOps.size())
             return {};
@@ -1196,9 +1710,24 @@ struct IrFunction
         return valueRestoreOps[instIdx];
     }
 
-    IrOp findRestoreOp(const IrInst& inst, bool limitToCurrentBlock) const
+    ValueRestoreLocation findRestoreLocation(const IrInst& inst, bool limitToCurrentBlock) const
     {
-        return findRestoreOp(getInstIndex(inst), limitToCurrentBlock);
+        return findRestoreLocation(getInstIndex(inst), limitToCurrentBlock);
+    }
+
+    bool hasRestoreLocation(const IrInst& inst, bool limitToCurrentBlock) const
+    {
+        return findRestoreLocation(getInstIndex(inst), limitToCurrentBlock).op.kind != IrOpKind::None;
+    }
+
+    void recordStoreLocationHint(uint32_t instIdx, StoreLocationHint hint)
+    {
+        storeLocationHints[instIdx] = hint;
+    }
+
+    const StoreLocationHint* findStoreLocationHint(uint32_t instIdx) const
+    {
+        return storeLocationHints.find(instIdx);
     }
 
     BytecodeTypes getBytecodeTypesAt(int pcpos) const
