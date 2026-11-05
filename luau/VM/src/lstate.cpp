@@ -198,6 +198,10 @@ lua_State* lua_newstate(lua_Alloc f, void* ud)
     g->grayagain = NULL;
     g->weak = NULL;
     g->totalbytes = sizeof(LG);
+    g->memorybase = 0;
+    g->memorylimit = 0;
+    g->memoryrelaxed = 0;
+    g->memoryrefused = 0;
     g->gcgoal = LUAI_GCGOAL;
     g->gcstepmul = LUAI_GCSTEPMUL;
     g->gcstepsize = LUAI_GCSTEPSIZE << 10;

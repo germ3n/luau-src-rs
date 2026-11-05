@@ -185,6 +185,14 @@ typedef struct global_State
 
     size_t GCthreshold;                       // when totalbytes > GCthreshold, run GC step
     size_t totalbytes;                        // number of bytes currently allocated
+
+    // The memory limit of what runs in this state, counted in totalbytes' own bytes, the sizes
+    // objects are asked for: the allocator's pages and size classes, and when the collector ran,
+    // never change it. See luau_setmemorylimit.
+    size_t memorybase;    // totalbytes when the limit was set; the count starts there, at zero
+    size_t memorylimit;   // the most bytes the count may reach, 0 for no limit
+    uint8_t memoryrelaxed; // nonzero while allocations may pass the limit, though they still count
+    uint8_t memoryrefused; // nonzero when the error last raised is the limit refusing an allocation
     int gcgoal;                               // see LUAI_GCGOAL
     int gcstepmul;                            // see LUAI_GCSTEPMUL
     int gcstepsize;                          // see LUAI_GCSTEPSIZE

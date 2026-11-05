@@ -491,9 +491,31 @@ static void freegcoblock(lua_State* L, int sizeClass, void* block, lua_Page* pag
         freeclasspage(L, g->freegcopages, &g->allgcopages, page, sizeClass);
 }
 
+// Refuses growing by nsize - osize bytes past the memory limit, before anything is allocated, as
+// the allocator running out would. The count is totalbytes since the limit was set, so it moves
+// by the sizes objects are asked for and nothing else; it is signed, as freeing what was there
+// before the limit can take it below zero.
+static void checkmemorylimit(lua_State* L, size_t osize, size_t nsize)
+{
+    global_State* g = L->global;
+
+    if (g->memorylimit == 0 || nsize <= osize || g->memoryrelaxed)
+        return;
+
+    long long used = (long long)g->totalbytes - (long long)g->memorybase;
+
+    if (used + (long long)(nsize - osize) > (long long)g->memorylimit)
+    {
+        g->memoryrefused = 1;
+        luaD_throw(L, LUA_ERRMEM);
+    }
+}
+
 void* luaM_new_(lua_State* L, size_t nsize, uint8_t memcat)
 {
     global_State* g = L->global;
+
+    checkmemorylimit(L, 0, nsize);
 
     int nclass = sizeclass(nsize);
 
@@ -518,6 +540,8 @@ GCObject* luaM_newgco_(lua_State* L, size_t nsize, uint8_t memcat)
     LUAU_ASSERT(nsize >= kGCOLinkOffset + sizeof(void*));
 
     global_State* g = L->global;
+
+    checkmemorylimit(L, 0, nsize);
 
     int nclass = sizeclass(nsize);
 
@@ -599,6 +623,8 @@ void* luaM_realloc_(lua_State* L, void* block, size_t osize, size_t nsize, uint8
     global_State* g = L->global;
     LUAU_ASSERT((osize == 0) == (block == NULL));
 
+    checkmemorylimit(L, osize, nsize);
+
     int nclass = sizeclass(nsize);
     int oclass = sizeclass(osize);
     void* result;
@@ -635,6 +661,51 @@ void* luaM_realloc_(lua_State* L, void* block, size_t osize, size_t nsize, uint8
     }
 
     return result;
+}
+
+// A limit on the memory what runs next may hold, counted from zero here: from now, the bytes its
+// objects take are added as they are made and taken away as they are freed, and an allocation
+// that would take the count past limit raises LUA_ERRMEM instead. 0 lifts the limit. The count
+// is of the sizes Luau asks for, so it is the same for the same program whatever the allocator
+// does, and the collector frees by bytes alone, so it frees at the same points too.
+extern "C"
+void luau_setmemorylimit(lua_State* L, size_t limit)
+{
+    global_State* g = L->global;
+
+    g->memorybase = g->totalbytes;
+    g->memorylimit = limit;
+    g->memoryrefused = 0;
+}
+
+// The bytes counted since the limit was set: those made less those freed.
+extern "C"
+long long luau_getmemoryused(lua_State* L)
+{
+    global_State* g = L->global;
+
+    return (long long)g->totalbytes - (long long)g->memorybase;
+}
+
+// Lets allocations pass the limit while relaxed is nonzero, still counting them, for what the
+// embedder must not fail at; returns whether it was relaxed before.
+extern "C"
+int luau_relaxmemorylimit(lua_State* L, int relaxed)
+{
+    global_State* g = L->global;
+    int previous = g->memoryrelaxed;
+
+    g->memoryrelaxed = relaxed != 0;
+
+    return previous;
+}
+
+// Whether the error last raised is the limit refusing an allocation. Luau calls error handlers
+// for memory errors too, and a handler can tell from this to leave the error as it is.
+extern "C"
+int luau_memoryrefused(lua_State* L)
+{
+    return L->global->memoryrefused;
 }
 
 void luaM_getpagewalkinfo(lua_Page* page, char** start, char** end, int* busyBlocks, int* blockSize)

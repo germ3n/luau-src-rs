@@ -650,12 +650,24 @@ static void freeobj(lua_State* L, GCObject* o, lua_Page* page)
     }
 }
 
+// Shrinking the string table makes the smaller one before freeing the bigger, so it passes the
+// memory limit for a moment while it gives memory back; the collector's own work never fails it.
+static void resizestrings(lua_State* L, int size)
+{
+    global_State* g = L->global;
+    uint8_t relaxed = g->memoryrelaxed;
+
+    g->memoryrelaxed = 1;
+    luaS_resize(L, size);
+    g->memoryrelaxed = relaxed;
+}
+
 static void shrinkbuffers(lua_State* L)
 {
     global_State* g = L->global;
     // check size of string hash
     if (g->strt.nuse < cast_to(uint32_t, g->strt.size / 4) && g->strt.size > LUA_MINSTRTABSIZE * 2)
-        luaS_resize(L, g->strt.size / 2); // table is too big
+        resizestrings(L, g->strt.size / 2); // table is too big
 }
 
 static void shrinkbuffersfull(lua_State* L)
@@ -666,7 +678,7 @@ static void shrinkbuffersfull(lua_State* L)
     while (g->strt.nuse < cast_to(uint32_t, hashsize / 4) && hashsize > LUA_MINSTRTABSIZE * 2)
         hashsize /= 2;
     if (hashsize != g->strt.size)
-        luaS_resize(L, hashsize); // table is too big
+        resizestrings(L, hashsize); // table is too big
 }
 
 static bool deletegco(void* context, lua_Page* page, GCObject* gco)
@@ -974,58 +986,19 @@ static size_t gcstep(lua_State* L, size_t limit)
     return cost;
 }
 
-static int64_t getheaptriggererroroffset(global_State* g)
-{
-    // adjust for error using Proportional-Integral controller
-    // https://en.wikipedia.org/wiki/PID_controller
-    int32_t errorKb = int32_t((g->gcstats.atomicstarttotalsizebytes - g->gcstats.heapgoalsizebytes) / 1024);
-
-    // we use sliding window for the error integral to avoid error sum 'windup' when the desired target cannot be reached
-    const size_t triggertermcount = sizeof(g->gcstats.triggerterms) / sizeof(g->gcstats.triggerterms[0]);
-
-    int32_t* slot = &g->gcstats.triggerterms[g->gcstats.triggertermpos % triggertermcount];
-    int32_t prev = *slot;
-    *slot = errorKb;
-    g->gcstats.triggerintegral += errorKb - prev;
-    g->gcstats.triggertermpos++;
-
-    // controller tuning
-    // https://en.wikipedia.org/wiki/Ziegler%E2%80%93Nichols_method
-    const double Ku = 0.9; // ultimate gain (measured)
-    const double Tu = 2.5; // oscillation period (measured)
-
-    const double Kp = 0.45 * Ku; // proportional gain
-    const double Ti = 0.8 * Tu;
-    const double Ki = 0.54 * Ku / Ti; // integral gain
-
-    double proportionalTerm = Kp * errorKb;
-    double integralTerm = Ki * g->gcstats.triggerintegral;
-
-    double totalTerm = proportionalTerm + integralTerm;
-
-    return int64_t(totalTerm * 1024);
-}
-
+// When the next cycle starts: once the heap reaches the goal, and nothing else decides it.
+//
+// Luau's own pacer started a cycle earlier by a guess of what the program allocates while the
+// collector marks, which it made from the clock: the allocation rate between cycles and how long
+// marking took, both in seconds, and a controller fed by those guesses' errors. On a loaded
+// machine a cycle takes longer, so it started earlier and garbage was freed at other points than
+// on an idle one. A contract's memory limit is reached at an allocation every node must agree on,
+// and so is what weak tables still hold, so the schedule follows the bytes the script allocates
+// and frees, and nothing about the machine running it.
 static size_t getheaptrigger(global_State* g, size_t heapgoal)
 {
-    // adjust threshold based on a guess of how many bytes will be allocated between the cycle start and sweep phase
-    // our goal is to begin the sweep when used memory has reached the heap goal
-    const double durationthreshold = 1e-3;
-    double allocationduration = g->gcstats.atomicstarttimestamp - g->gcstats.endtimestamp;
-
-    // avoid measuring intervals smaller than 1ms
-    if (allocationduration < durationthreshold)
-        return heapgoal;
-
-    double allocationrate = (g->gcstats.atomicstarttotalsizebytes - g->gcstats.endtotalsizebytes) / allocationduration;
-    double markduration = g->gcstats.atomicstarttimestamp - g->gcstats.starttimestamp;
-
-    int64_t expectedgrowth = int64_t(markduration * allocationrate);
-    int64_t offset = getheaptriggererroroffset(g);
-    int64_t heaptrigger = heapgoal - (expectedgrowth + offset);
-
-    // clamp the trigger between memory use at the end of the cycle and the heap goal
-    return heaptrigger < int64_t(g->totalbytes) ? g->totalbytes : (heaptrigger > int64_t(heapgoal) ? heapgoal : size_t(heaptrigger));
+    (void)g;
+    return heapgoal;
 }
 
 size_t luaC_step(lua_State* L, bool assist)

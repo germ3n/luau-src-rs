@@ -61,6 +61,10 @@ int luaD_rawrunprotected(lua_State* L, Pfunc f, void* ud)
 
 l_noret luaD_throw(lua_State* L, int errcode)
 {
+    // Any other error is not the memory limit's; see luau_memoryrefused.
+    if (errcode != LUA_ERRMEM)
+        L->global->memoryrefused = 0;
+
     if (lua_jmpbuf* jb = L->global->errorjmp)
     {
         jb->status = errcode;
@@ -159,6 +163,10 @@ int luaD_rawrunprotected(lua_State* L, Pfunc f, void* ud)
 
 l_noret luaD_throw(lua_State* L, int errcode)
 {
+    // Any other error is not the memory limit's; see luau_memoryrefused.
+    if (errcode != LUA_ERRMEM)
+        L->global->memoryrefused = 0;
+
     throw lua_exception(L, errcode);
 }
 #endif
