@@ -309,6 +309,191 @@ unsigned long long luau_getfuelcost(LuauOpcode opcode)
     }
 }
 
+// chainv4: each opcode's name, by its number, for the host to name the costs it sets.
+static const char* const kFuelOpcodeNames[] = {
+    "NOP",
+    "BREAK",
+    "LOADNIL",
+    "LOADB",
+    "LOADN",
+    "LOADK",
+    "MOVE",
+    "GETGLOBAL",
+    "SETGLOBAL",
+    "GETUPVAL",
+    "SETUPVAL",
+    "CLOSEUPVALS",
+    "GETIMPORT",
+    "GETTABLE",
+    "SETTABLE",
+    "GETTABLEKS",
+    "SETTABLEKS",
+    "GETTABLEN",
+    "SETTABLEN",
+    "NEWCLOSURE",
+    "NAMECALL",
+    "CALL",
+    "RETURN",
+    "JUMP",
+    "JUMPBACK",
+    "JUMPIF",
+    "JUMPIFNOT",
+    "JUMPIFEQ",
+    "JUMPIFLE",
+    "JUMPIFLT",
+    "JUMPIFNOTEQ",
+    "JUMPIFNOTLE",
+    "JUMPIFNOTLT",
+    "ADD",
+    "SUB",
+    "MUL",
+    "DIV",
+    "MOD",
+    "POW",
+    "ADDK",
+    "SUBK",
+    "MULK",
+    "DIVK",
+    "MODK",
+    "POWK",
+    "AND",
+    "OR",
+    "ANDK",
+    "ORK",
+    "CONCAT",
+    "NOT",
+    "MINUS",
+    "LENGTH",
+    "NEWTABLE",
+    "DUPTABLE",
+    "SETLIST",
+    "FORNPREP",
+    "FORNLOOP",
+    "FORGLOOP",
+    "FORGPREP_INEXT",
+    "FASTCALL3",
+    "FORGPREP_NEXT",
+    "NATIVECALL",
+    "GETVARARGS",
+    "DUPCLOSURE",
+    "PREPVARARGS",
+    "LOADKX",
+    "JUMPX",
+    "FASTCALL",
+    "COVERAGE",
+    "CAPTURE",
+    "SUBRK",
+    "DIVRK",
+    "FASTCALL1",
+    "FASTCALL2",
+    "FASTCALL2K",
+    "FORGPREP",
+    "JUMPXEQKNIL",
+    "JUMPXEQKB",
+    "JUMPXEQKN",
+    "JUMPXEQKS",
+    "IDIV",
+    "IDIVK",
+    "GETUDATAKS",
+    "SETUDATAKS",
+    "NAMECALLUDATA",
+    "NEWCLASSMEMBER",
+    "CALLFB",
+    "CMPPROTO",
+    "FASTPCALL",
+    "NEWCLASS",
+    "CONSTRUCT",
+    "FINCONSTRUCT",
+    "GETPRIVATEFIELD",
+    "SETPRIVATEFIELD",
+};
+static_assert(sizeof(kFuelOpcodeNames) / sizeof(kFuelOpcodeNames[0]) == LOP__COUNT, "an opcode without a name for its fuel cost");
+static_assert(LOP__COUNT <= LUAU_FUEL_OPCODES, "more opcodes than fuel cost slots");
+
+void luau_defaultfuelcosts(unsigned long long* costs)
+{
+    for (int slot = 0; slot < LUAU_FUEL_SLOTS; ++slot)
+        costs[slot] = 1;
+
+    for (int op = 0; op < LOP__COUNT; ++op)
+        costs[op] = luau_getfuelcost(LuauOpcode(op));
+
+    costs[LUAU_FUEL_SLOT_BYTES] = 64;
+    costs[LUAU_FUEL_SLOT_ELEMENTS] = 8;
+    costs[LUAU_FUEL_SLOT_SORT] = 1;
+    costs[LUAU_FUEL_SLOT_MATCH] = 1;
+}
+
+unsigned long long luau_fuelcost(lua_State* L, int slot)
+{
+    return L->global->fuelcosts[slot];
+}
+
+// chainv4: how many fuel cost slots there are, and the name of each: an opcode's, such as "ADD", or
+// a library rate's ("bytes_per_fuel", "elements_per_fuel", "sort_comparison", "match_step"); NULL for
+// a slot no opcode uses.
+extern "C"
+int luau_fuelslots()
+{
+    return LUAU_FUEL_SLOTS;
+}
+
+extern "C"
+const char* luau_fuelslotname(int slot)
+{
+    if (slot >= 0 && slot < LOP__COUNT)
+        return kFuelOpcodeNames[slot];
+
+    switch (slot)
+    {
+    case LUAU_FUEL_SLOT_BYTES:
+        return "bytes_per_fuel";
+    case LUAU_FUEL_SLOT_ELEMENTS:
+        return "elements_per_fuel";
+    case LUAU_FUEL_SLOT_SORT:
+        return "sort_comparison";
+    case LUAU_FUEL_SLOT_MATCH:
+        return "match_step";
+    default:
+        return nullptr;
+    }
+}
+
+// chainv4: the state's fuel costs, n of them from slot 0, the rest kept. A rate, bytes or elements a
+// unit of fuel pays for, is at least 1.
+extern "C"
+void luau_setfuelcosts(lua_State* L, const unsigned long long* costs, int n)
+{
+    global_State* g = L->global;
+
+    for (int slot = 0; slot < n && slot < LUAU_FUEL_SLOTS; ++slot)
+        g->fuelcosts[slot] = costs[slot];
+
+    if (g->fuelcosts[LUAU_FUEL_SLOT_BYTES] == 0)
+        g->fuelcosts[LUAU_FUEL_SLOT_BYTES] = 1;
+    if (g->fuelcosts[LUAU_FUEL_SLOT_ELEMENTS] == 0)
+        g->fuelcosts[LUAU_FUEL_SLOT_ELEMENTS] = 1;
+}
+
+// chainv4: the state's fuel costs, into n slots from slot 0.
+extern "C"
+void luau_getfuelcosts(lua_State* L, unsigned long long* costs, int n)
+{
+    for (int slot = 0; slot < n && slot < LUAU_FUEL_SLOTS; ++slot)
+        costs[slot] = L->global->fuelcosts[slot];
+}
+
+// chainv4: the defaults, as a state starts with them, into n slots from slot 0.
+extern "C"
+void luau_getdefaultfuelcosts(unsigned long long* costs, int n)
+{
+    unsigned long long all[LUAU_FUEL_SLOTS];
+    luau_defaultfuelcosts(all);
+
+    for (int slot = 0; slot < n && slot < LUAU_FUEL_SLOTS; ++slot)
+        costs[slot] = all[slot];
+}
+
 extern "C"
 void luau_setfuel(lua_State* L, unsigned long long fuel)
 {
@@ -324,7 +509,7 @@ unsigned long long luau_getfuel(lua_State* L)
 #include "ldebug.h"
 void luau_consumefuel(lua_State* L, const Instruction* pc, LuauOpcode opcode)
 {
-    unsigned long long cost = luau_getfuelcost(opcode);
+    unsigned long long cost = L->global->fuelcosts[opcode];
     if (L->fuel < cost)
     {
         // The error reports the current line, which needs savedpc to point past this

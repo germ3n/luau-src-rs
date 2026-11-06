@@ -224,6 +224,7 @@ lua_State* lua_newstate(lua_Alloc allocator, void* ud)
 
     g->cb = lua_Callbacks();
     g->ecb = lua_ExecutionCallbacks();
+    luau_defaultfuelcosts(g->fuelcosts);
     g->gcstats = GCStats();
 
     g->lastprotoid = 1;

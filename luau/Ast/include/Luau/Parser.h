@@ -262,7 +262,8 @@ private:
         AstArray<Position>* commaPositions = nullptr,
         Position* initialCommaPosition = nullptr,
         Position* varargAnnotationColonPosition = nullptr,
-        bool isConst = false
+        bool isConst = false,
+        bool parameters = false
     );
 
     AstType* parseOptionalType();
@@ -550,6 +551,10 @@ private:
     std::vector<HotComment> hotcomments;
 
     bool hotcommentHeader = true;
+
+    // chainv4: --@const_params in the header makes every function parameter const, as `const` before
+    // one parameter's name does.
+    bool constParams = false;
 
     unsigned int recursionCounter;
 

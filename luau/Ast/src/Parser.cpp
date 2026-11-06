@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <string_view>
 #include <math.h>
 
 LUAU_FASTINTVARIABLE(LuauRecursionLimit, 1000)
@@ -1073,10 +1074,7 @@ AstStatFunction* Parser::parseFunctionStat(const AstArray<AstAttr*>& attributes,
     AstExpr* expr = parseFunctionName(hasself, debugname);
 
     if (!isExprLValue(expr))
-    {
-        expr = FFlag::LuauExportValueSyntax ? reportLValueError(expr)
-                                            : reportExprError(expr->location, copy({expr}), "Assigned expression must be a variable or a field");
-    }
+        expr = reportLValueError(expr);
 
     matchRecoveryStopOnToken[Lexeme::ReservedEnd]++;
 
@@ -2208,11 +2206,9 @@ AstExprError* Parser::reportLValueError(AstExpr* expr)
 // varlist `=' explist
 AstStat* Parser::parseAssignment(AstExpr* initial)
 {
+    // chainv4: a const said to be one, whatever the flag.
     if (!isExprLValue(initial))
-
-        initial = FFlag::LuauExportValueSyntax
-                      ? reportLValueError(initial)
-                      : reportExprError(initial->location, copy({initial}), "Assigned expression must be a variable or a field");
+        initial = reportLValueError(initial);
 
     TempVector<AstExpr*> vars(scratchExpr);
     TempVector<Position> varsCommaPositions(scratchPosition);
@@ -2227,8 +2223,7 @@ AstStat* Parser::parseAssignment(AstExpr* initial)
         AstExpr* expr = parsePrimaryExpr(/* asStatement= */ true);
 
         if (!isExprLValue(expr))
-            expr = FFlag::LuauExportValueSyntax ? reportLValueError(expr)
-                                                : reportExprError(expr->location, copy({expr}), "Assigned expression must be a variable or a field");
+            expr = reportLValueError(expr);
 
         vars.push_back(expr);
     }
@@ -2376,12 +2371,9 @@ AstStat* Parser::parseExportValue(
 // var [`+=' | `-=' | `*=' | `/=' | `%=' | `^=' | `..='] exp
 AstStat* Parser::parseCompoundAssignment(AstExpr* initial, AstExprBinary::Op op)
 {
+    // chainv4: a const said to be one, as a plain assignment says, whatever the flag.
     if (!isExprLValue(initial))
-    {
-        initial = FFlag::LuauExportValueSyntax
-                      ? reportLValueError(initial)
-                      : reportExprError(initial->location, copy({initial}), "Assigned expression must be a variable or a field");
-    }
+        initial = reportLValueError(initial);
 
     Position opPosition = lexer.current().location.begin;
     nextLexeme();
@@ -2462,10 +2454,12 @@ std::pair<AstExprFunction*, AstLocal*> Parser::parseFunctionBody(
     if (lexer.current().type != ')')
     {
         if (cstNode)
-            std::tie(vararg, varargLocation, varargAnnotation) =
-                parseBindingList(args, /* allowDot3= */ true, &cstNode->argsCommaPositions, nullptr, &cstNode->varargAnnotationColonPosition);
+            std::tie(vararg, varargLocation, varargAnnotation) = parseBindingList(
+                args, /* allowDot3= */ true, &cstNode->argsCommaPositions, nullptr, &cstNode->varargAnnotationColonPosition, false, /* parameters= */ true
+            );
         else
-            std::tie(vararg, varargLocation, varargAnnotation) = parseBindingList(args, /* allowDot3= */ true);
+            std::tie(vararg, varargLocation, varargAnnotation) =
+                parseBindingList(args, /* allowDot3= */ true, nullptr, nullptr, nullptr, false, /* parameters= */ true);
     }
 
     std::optional<Location> argLocation;
@@ -2585,7 +2579,8 @@ LUAU_NOINLINE std::tuple<bool, Location, AstTypePack*> Parser::parseBindingList(
     AstArray<Position>* commaPositions,
     Position* initialCommaPosition,
     Position* varargAnnotationColonPosition,
-    bool isConst
+    bool isConst,
+    bool parameters
 )
 {
     TempVector<Position> localCommaPositions(scratchPosition);
@@ -2616,7 +2611,18 @@ LUAU_NOINLINE std::tuple<bool, Location, AstTypePack*> Parser::parseBindingList(
             return {true, varargLocation, tailAnnotation};
         }
 
-        result.push_back(parseBinding(isConst));
+        // chainv4: a parameter is const, so the body may not assign it, under --!const_params or with
+        // `const` before its name. A parameter named const itself is still one: `const` is taken as
+        // the keyword only when a name follows it.
+        bool bindingConst = isConst || (parameters && constParams);
+
+        if (parameters && lexer.current().type == Lexeme::Name && AstName(lexer.current().name) == "const" && lexer.lookahead().type == Lexeme::Name)
+        {
+            nextLexeme();
+            bindingConst = true;
+        }
+
+        result.push_back(parseBinding(bindingConst));
 
         if (lexer.current().type != ',')
             break;
@@ -5680,6 +5686,21 @@ void Parser::nextLexeme()
         // The parser will turn this into a proper syntax error.
         if (lexeme.type == Lexeme::BrokenComment)
             return;
+
+        // chainv4: --@const_params, among chainv4's other --@ annotations in the header, before the first
+        // statement, makes every function parameter const.
+        if (hotcommentHeader && lexeme.type == Lexeme::Comment && lexeme.getLength() && lexeme.data[0] == '@')
+        {
+            std::string_view text(lexeme.data + 1, lexeme.getLength() - 1);
+
+            while (!text.empty() && isSpace(text.front()))
+                text.remove_prefix(1);
+            while (!text.empty() && isSpace(text.back()))
+                text.remove_suffix(1);
+
+            if (text == "const_params")
+                constParams = true;
+        }
 
         // Comments starting with ! are called "hot comments" and contain directives for type checking / linting / compiling
         if (lexeme.type == Lexeme::Comment && lexeme.getLength() && lexeme.data[0] == '!')

@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 LUAU_FASTFLAGVARIABLE(LuauFastpcall)
 
@@ -36,9 +37,72 @@ static int luaB_print(lua_State* L)
     return 0;
 }
 
+// chainv4: the value of c as a digit, or 99 for what is no digit in any base.
+static int digitvalue(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A' + 10;
+    return 99;
+}
+
+// chainv4: text with digits grouped by _, as in 1_000_000 or 0xff_ff, without the _s, into b. Each
+// _ must stand between two digits of the base, hex digits after 0x in base 10's text: false for one
+// that does not, such as _1, 1_, 1__0, 1_.5 or 0x_ff, so a slip reads as no number rather than some
+// other one.
+static bool ungrouped(const char* s, size_t len, int base, luaL_Strbuf* b)
+{
+    int radix = base;
+
+    for (size_t i = 0; i < len; ++i)
+    {
+        char c = s[i];
+
+        if (c == '_')
+        {
+            if (i == 0 || i + 1 >= len || digitvalue(s[i - 1]) >= radix || digitvalue(s[i + 1]) >= radix)
+                return false;
+            continue;
+        }
+
+        if (base == 10 && radix == 10 && (c == 'x' || c == 'X') && i > 0 && s[i - 1] == '0')
+            radix = 16;
+
+        luaL_addchar(b, c);
+    }
+
+    return true;
+}
+
 static int luaB_tonumber(lua_State* L)
 {
     int base = luaL_optinteger(L, 2, 10);
+
+    // chainv4: grouped digits read as the same digits ungrouped.
+    if (lua_type(L, 1) == LUA_TSTRING)
+    {
+        size_t len = 0;
+        const char* text = lua_tolstring(L, 1, &len);
+
+        if (memchr(text, '_', len))
+        {
+            luaL_Strbuf b;
+            luaL_buffinit(L, &b);
+
+            if (!ungrouped(text, len, base, &b))
+            {
+                lua_pushnil(L);
+                return 1;
+            }
+
+            luaL_pushresult(&b);
+            lua_replace(L, 1);
+        }
+    }
+
     if (base == 10)
     { // standard conversion
         int isnum = 0;

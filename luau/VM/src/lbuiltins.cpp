@@ -1277,6 +1277,11 @@ static int luauF_tonumber(lua_State* L, StkId res, TValue* arg0, int nresults, S
             setnvalue(res, nvalue(arg0));
             return 1;
         }
+        else if (ttisstring(arg0) && memchr(svalue(arg0), '_', tsvalue(arg0)->len))
+        {
+            // chainv4: digits grouped with _ are read by tonumber itself (lbaselib.cpp).
+            return -1;
+        }
         else if (ttisstring(arg0) && luaO_str2d(svalue(arg0), &num))
         {
             setnvalue(res, num);

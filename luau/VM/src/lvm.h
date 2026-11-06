@@ -4,6 +4,7 @@
 
 #include "lobject.h"
 #include "ltm.h"
+#include "lstate.h"
 
 #define tostring(L, o) ((ttype(o) == LUA_TSTRING) || (luaV_tostring(L, o)))
 
@@ -14,13 +15,14 @@
 LUAI_FUNC int luaV_strcmp(const TString* ls, const TString* rs);
 
 // Fuel for library work that grows with what it is given, which the instruction calling it does not
-// pay for: so many bytes copied, scanned or built for one unit, and one unit per step elsewhere.
-#define LUAU_FUEL_BYTES 64
-#define LUAU_FUEL_ELEMENTS 8
+// pay for: so many bytes copied, scanned or built for one unit, and one unit per step elsewhere, at
+// the rates in the state's fuel costs (lstate.h's LUAU_FUEL_SLOT_*), 64 bytes and 8 elements by default.
 // Charges cost, raising "out of fuel" with the tank emptied when there is less than that left.
 LUAI_FUNC void luau_chargefuel(lua_State* L, unsigned long long cost);
-#define luau_chargebytes(L, n) luau_chargefuel((L), (unsigned long long)(n) / LUAU_FUEL_BYTES)
-#define luau_chargeelements(L, n) luau_chargefuel((L), (unsigned long long)(n) / LUAU_FUEL_ELEMENTS)
+// What one of the state's fuel cost slots holds.
+LUAI_FUNC unsigned long long luau_fuelcost(lua_State* L, int slot);
+#define luau_chargebytes(L, n) luau_chargefuel((L), (unsigned long long)(n) / luau_fuelcost((L), LUAU_FUEL_SLOT_BYTES))
+#define luau_chargeelements(L, n) luau_chargefuel((L), (unsigned long long)(n) / luau_fuelcost((L), LUAU_FUEL_SLOT_ELEMENTS))
 LUAI_FUNC int luaV_lessthan(lua_State* L, const TValue* l, const TValue* r);
 LUAI_FUNC int luaV_lessequal(lua_State* L, const TValue* l, const TValue* r);
 LUAI_FUNC int luaV_equalval(lua_State* L, const TValue* t1, const TValue* t2);

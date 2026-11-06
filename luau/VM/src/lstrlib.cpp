@@ -452,7 +452,7 @@ static const char* match(MatchState* ms, const char* s, const char* p)
 
     lua_State* L = ms->L;
     // A step of the matcher: a pattern that backtracks takes many, and each is paid for.
-    luau_chargefuel(L, 1);
+    luau_chargefuel(L, luau_fuelcost(L, LUAU_FUEL_SLOT_MATCH));
     void (*interrupt)(lua_State*, int) = L->global->cb.interrupt;
 
     if (LUAU_UNLIKELY(!!interrupt))
@@ -612,7 +612,7 @@ static const char* lmemfind(lua_State* L, const char* s1, size_t l1, const char*
         luau_chargebytes(L, l1);
         while (l1 > 0 && (init = (const char*)memchr(s1, *s2, l1)) != NULL)
         {
-            luau_chargebytes(L, l2 + LUAU_FUEL_BYTES);
+            luau_chargebytes(L, l2 + luau_fuelcost(L, LUAU_FUEL_SLOT_BYTES));
             init++; // 1st char is already checked
             if (memcmp(init, s2 + 1, l2) == 0)
                 return init - 1;

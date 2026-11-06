@@ -203,6 +203,19 @@ struct LuauPageset
 ** `global state', shared by all threads of this state
 */
 // clang-format off
+// chainv4: what fuel costs, a table each state carries, which the host may set (luau_setfuelcosts):
+// an opcode's cost at its number, then the library's rates.
+#define LUAU_FUEL_OPCODES 128
+// Bytes a unit of fuel pays for, where a library copies, scans or builds so many.
+#define LUAU_FUEL_SLOT_BYTES 128
+// Elements a unit of fuel pays for, where a library goes over so many.
+#define LUAU_FUEL_SLOT_ELEMENTS 129
+// What one comparison of table.sort costs.
+#define LUAU_FUEL_SLOT_SORT 130
+// What one step of the pattern matcher costs.
+#define LUAU_FUEL_SLOT_MATCH 131
+#define LUAU_FUEL_SLOTS 132
+
 typedef struct global_State
 {
     stringtable strt; // hash table for strings
@@ -304,6 +317,9 @@ typedef struct global_State
 #ifdef LUAI_GCMETRICS
     GCMetrics gcmetrics;
 #endif
+
+    // chainv4: what fuel costs here (LUAU_FUEL_SLOTS).
+    unsigned long long fuelcosts[LUAU_FUEL_SLOTS];
 } global_State;
 // clang-format on
 
@@ -390,3 +406,5 @@ union GCObject
 
 LUAI_FUNC lua_State* luaE_newthread(lua_State* L);
 LUAI_FUNC void luaE_freethread(lua_State* L, lua_State* L1, struct lua_Page* page);
+// chainv4: the fuel costs a state starts with, LUAU_FUEL_SLOTS of them (lvmexecute.cpp).
+LUAI_FUNC void luau_defaultfuelcosts(unsigned long long* costs);

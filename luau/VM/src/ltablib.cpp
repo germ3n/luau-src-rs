@@ -575,7 +575,7 @@ static int tsort(lua_State* L)
         unsigned long long bits = 1;
         for (int left = n; left > 1; left >>= 1)
             bits++;
-        luau_chargefuel(L, (unsigned long long)n * bits);
+        luau_chargefuel(L, (unsigned long long)n * bits * luau_fuelcost(L, LUAU_FUEL_SLOT_SORT));
         sort_rec(L, t, 0, n - 1, n, pred);
     }
     return 0;
@@ -657,10 +657,12 @@ static int tfind(lua_State* L)
         }
     }
 
+    unsigned long long per = luau_fuelcost(L, LUAU_FUEL_SLOT_ELEMENTS);
+
     for (int i = init;; ++i)
     {
-        // Every eighth element looked at is paid for.
-        if ((i - init) % LUAU_FUEL_ELEMENTS == LUAU_FUEL_ELEMENTS - 1)
+        // Every eighth element looked at, by default, is paid for.
+        if ((unsigned long long)(i - init) % per == per - 1)
             luau_chargefuel(L, 1);
 
         const TValue* e = luaH_getnum(t, i);
